@@ -19,7 +19,8 @@ def home():
 def run_bot():
     try:
         print("🤖 بوت تيليجرام يبدأ الاتصال...")
-        bot.infinity_polling(none_stop=True, interval=0, timeout=20)
+        bot.remove_webhook() # مسح أي تداخل أو اتصال قديم لمانع الخطأ 409
+        bot.infinity_polling(none_stop=True, interval=1, timeout=20)
     except Exception as e:
         print(f"Error in bot polling: {e}")
 
@@ -78,7 +79,6 @@ def check_instagram_deep(username):
             details = [f"✅ **إنستغرام (Instagram)**\n🔗 الرابط: {url}"]
             details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
             
-            # محاولة استخراج الوصف من Meta Tags
             meta_desc = soup.find('meta', property='og:description')
             if meta_desc:
                 details.append(f"📌 معلومات الحساب والملخص:\n{meta_desc.get('content', '')}")
@@ -123,12 +123,11 @@ def check_reddit_deep(username):
             details = [f"✅ **ريديت (Reddit)**\n🔗 الرابط: https://www.reddit.com/user/{username}"]
             details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
             details.append(f"🆔 معرف الحساب (ID): {data.get('id', 'غير متوفر')}")
-            details.append(f"karma ⭐ الكارما الإجمالية: {data.get('total_karma', 0)}")
+            details.append(f"⭐ الكارما الإجمالية: {data.get('total_karma', 0)}")
             details.append(f"📅 تاريخ الانضمام: {data.get('created_utc', 'غير متوفر')}")
             return "\n".join(details)
     except Exception:
         pass
-    # فحص احتياطي عبر HTML إذا فشل الـ API
     return check_general_platform("ريديت (Reddit)", "https://www.reddit.com/user/{}", username)
 
 def check_snapchat_deep(username):
@@ -195,41 +194,35 @@ def search_username(message):
     if not username:
         return
         
-    msg = bot.reply_to(message, f"🔍 جاري جمع وتحليل البصمة الرقمية الشاملة لـ (@{username})... قد يستغرق بضع ثوانٍ.")
+    msg = bot.reply_to(message, f"🔍 جاري جمع وتحليل البصمة الرقمية الشاملة لـ (@{username})... يرجى الانتظار.")
     
     found_any = False
     
-    # 1. فحص غيت هاب (معلومات تفصيلية غنية جداً)
     gh_res = check_github_deep(username)
     if gh_res:
         found_any = True
         bot.send_message(message.chat.id, gh_res, parse_mode="Markdown")
 
-    # 2. فحص تيك توك (معلومات وبيانات دقيقة)
     tiktok_res = check_tiktok_deep(username)
     if tiktok_res:
         found_any = True
         bot.send_message(message.chat.id, tiktok_res, parse_mode="Markdown")
 
-    # 3. فحص إنستغرام (بيانات متقدمة)
     ig_res = check_instagram_deep(username)
     if ig_res:
         found_any = True
         bot.send_message(message.chat.id, ig_res, parse_mode="Markdown")
 
-    # 4. فحص ريديت
     reddit_res = check_reddit_deep(username)
     if reddit_res:
         found_any = True
         bot.send_message(message.chat.id, reddit_res, parse_mode="Markdown")
 
-    # 5. سناب شات
     snap_res = check_snapchat_deep(username)
     if snap_res:
         found_any = True
         bot.send_message(message.chat.id, snap_res, parse_mode="Markdown")
         
-    # 6. منصات أخرى
     other_platforms = {
         "تويتر / إكس (Twitter)": "https://twitter.com/{}"
     }
