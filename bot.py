@@ -7,30 +7,29 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask, request
 
+
 # =========================================================
-# CONFIG
+# إعدادات البوت
 # =========================================================
 
-TOKEN = os.environ.get("BOT_TOKEN")
-
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN غير موجود في Environment Variables")
+# حط توكن البوت الجديد هنا
+TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 
 bot = telebot.TeleBot(TOKEN)
+
 app = Flask(__name__)
 
-RENDER_URL = os.environ.get(
-    "RENDER_URL",
-    "https://osint-bot-t0vn.onrender.com"
-)
+# رابط Render الخاص بك
+RENDER_URL = "https://osint-bot-t0vn.onrender.com"
 
 WEBHOOK_URL = f"{RENDER_URL.rstrip('/')}/{TOKEN}"
 
+# تخزين نتائج البحث مؤقتًا
 USER_CACHE = {}
 
 
 # =========================================================
-# FLASK / WEBHOOK
+# الصفحة الرئيسية
 # =========================================================
 
 @app.route("/")
@@ -38,10 +37,16 @@ def home():
     return "🤖 OSINT Bot is active!"
 
 
+# =========================================================
+# Telegram Webhook
+# =========================================================
+
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
 
-    if request.headers.get("content-type", "").startswith("application/json"):
+    content_type = request.headers.get("content-type", "")
+
+    if content_type.startswith("application/json"):
 
         json_string = request.get_data().decode("utf-8")
 
@@ -55,35 +60,50 @@ def webhook():
 
 
 # =========================================================
-# USERNAME NORMALIZATION
+# تنظيف اليوزر
 # =========================================================
 
 def normalize_username(text):
     """
-    يحافظ على الرموز الموجودة في اليوزر.
-    
+    يحافظ على اليوزر كما كتبه المستخدم.
+
     أمثلة:
     @Lann_100  -> Lann_100
-    @user-name -> user-name
+    Lann_100   -> Lann_100
+    user-name  -> user-name
     user.name  -> user.name
-    test$user  -> test$user
     """
 
-    username = text.strip()
+    username = (text or "").strip()
 
     # إزالة @ من البداية فقط
     if username.startswith("@"):
         username = username[1:]
 
-    # إزالة المسافات من البداية والنهاية فقط
-    username = username.strip()
+    return username.strip()
 
-    return username
 
+# =========================================================
+# تشفير اليوزر داخل الرابط
+# =========================================================
+
+def encode_username(username):
+    """
+    يمنع الرموز الخاصة من كسر الرابط.
+    """
+
+    return urllib.parse.quote(
+        username,
+        safe=""
+    )
+
+
+# =========================================================
+# تقييم طول اليوزر
+# =========================================================
 
 def analyze_username_strength(username):
 
-    # نحسب طول الاسم كما هو
     length = len(username)
 
     if length == 3:
@@ -99,26 +119,15 @@ def analyze_username_strength(username):
         return "عادي طويل 📌"
 
 
-def encoded_username(username):
-    """
-    تشفير الجزء الخاص باليوزر داخل الرابط
-    حتى لا تكسر الرموز الخاصة URL.
-    """
-
-    return urllib.parse.quote(username, safe="")
-
-
 # =========================================================
-# GITHUB
+# GitHub
 # =========================================================
 
 def check_github(username):
 
-    # GitHub لديه قواعد خاصة بأسماء المستخدمين.
-    # لا نحاول تحويل الاسم أو حذف الرموز منه.
-    # إذا كان الاسم غير صالح في GitHub سيعيد API غالباً 404.
+    encoded = encode_username(username)
 
-    url = f"https://api.github.com/users/{encoded_username(username)}"
+    url = f"https://api.github.com/users/{encoded}"
 
     headers = {
         "User-Agent": "OSINT-Telegram-Bot",
@@ -133,29 +142,29 @@ def check_github(username):
             timeout=8
         )
 
-        if res.status_code == 200:
+        if res.status_code != 200:
+            return None
 
-            data = res.json()
+        data = res.json()
 
-            if (
-                "id" in data
-                and data.get("login", "").lower() == username.lower()
-            ):
+        login = data.get("login", "")
 
-                details = [
-                    "✅ **غيت هاب (GitHub)**",
-                    f"🔗 الرابط: https://github.com/{username}",
-                    f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
-                    f"🆔 المعرف الرقمي: {data.get('id', 'غير متوفر')}",
-                    f"👤 الاسم الكامل: {data.get('name') or 'غير محدد'}",
-                    f"📦 المستودعات: {data.get('public_repos', 0)}",
-                    f"👥 المتابعين: {data.get('followers', 0)}"
-                ]
+        if (
+            data.get("id")
+            and login.lower() == username.lower()
+        ):
 
-                return "\n".join(details)
+            details = [
+                "✅ GitHub",
+                f"🔗 الرابط: https://github.com/{username}",
+                f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
+                f"🆔 المعرف الرقمي: {data.get('id', 'غير متوفر')}",
+                f"👤 الاسم: {data.get('name') or 'غير محدد'}",
+                f"📦 المستودعات: {data.get('public_repos', 0)}",
+                f"👥 المتابعين: {data.get('followers', 0)}"
+            ]
 
-    except requests.RequestException:
-        pass
+            return "\n".join(details)
 
     except Exception:
         pass
@@ -164,12 +173,14 @@ def check_github(username):
 
 
 # =========================================================
-# TIKTOK
+# TikTok
 # =========================================================
 
 def check_tiktok(username):
 
-    url = f"https://www.tiktok.com/@{encoded_username(username)}"
+    encoded = encode_username(username)
+
+    url = f"https://www.tiktok.com/@{encoded}"
 
     headers = {
         "User-Agent": (
@@ -190,7 +201,10 @@ def check_tiktok(username):
         if res.status_code != 200:
             return None
 
-        soup = BeautifulSoup(res.text, "html.parser")
+        soup = BeautifulSoup(
+            res.text,
+            "html.parser"
+        )
 
         sig_data = soup.find(
             "script",
@@ -206,41 +220,45 @@ def check_tiktok(username):
                 sig_data.string or "{}"
             )
 
-            users = data.get(
+            user_module = data.get(
                 "UserModule",
                 {}
-            ).get(
+            )
+
+            users = user_module.get(
                 "users",
+                {}
+            )
+
+            stats_all = user_module.get(
+                "stats",
                 {}
             )
 
             for uid, info in users.items():
 
-                if info.get(
+                unique_id = info.get(
                     "uniqueId",
                     ""
-                ).lower() == username.lower():
+                )
+
+                if unique_id.lower() == username.lower():
 
                     details = [
-                        "✅ **تيك توك (TikTok)**",
+                        "✅ TikTok",
                         f"🔗 الرابط: {url}",
                         f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
                         f"👤 الاسم: {info.get('nickname') or 'غير محدد'}",
                         f"📝 البايو: {info.get('signature') or 'لا يوجد'}"
                     ]
 
-                    stats = data.get(
-                        "UserModule",
-                        {}
-                    ).get(
-                        "stats",
-                        {}
-                    ).get(
+                    stats = stats_all.get(
                         uid,
                         {}
                     )
 
                     if stats:
+
                         details.append(
                             f"👥 المتابعين: "
                             f"{stats.get('followerCount', 'مخفي')}"
@@ -251,9 +269,6 @@ def check_tiktok(username):
         except Exception:
             pass
 
-    except requests.RequestException:
-        pass
-
     except Exception:
         pass
 
@@ -261,14 +276,16 @@ def check_tiktok(username):
 
 
 # =========================================================
-# SNAPCHAT
+# Snapchat
 # =========================================================
 
 def check_snapchat(username):
 
+    encoded = encode_username(username)
+
     url = (
         f"https://www.snapchat.com/add/"
-        f"{encoded_username(username)}"
+        f"{encoded}"
     )
 
     headers = {
@@ -308,17 +325,13 @@ def check_snapchat(username):
             return None
 
         details = [
-            "✅ **سناب شات (Snapchat)**",
+            "✅ Snapchat",
             f"🔗 الرابط: {url}",
-            f"📊 تقييم اليوزر: "
-            f"{analyze_username_strength(username)}",
-            "👻 يمكنك فتح الرابط أعلاه مباشرة للتحقق من الحساب."
+            f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
+            "👻 يمكنك فتح الرابط للتحقق من الحساب."
         ]
 
         return "\n".join(details)
-
-    except requests.RequestException:
-        pass
 
     except Exception:
         pass
@@ -327,14 +340,16 @@ def check_snapchat(username):
 
 
 # =========================================================
-# INSTAGRAM
+# Instagram
 # =========================================================
 
 def check_instagram(username):
 
+    encoded = encode_username(username)
+
     url = (
         f"https://www.instagram.com/"
-        f"{encoded_username(username)}/"
+        f"{encoded}/"
     )
 
     headers = {
@@ -377,16 +392,12 @@ def check_instagram(username):
             return None
 
         details = [
-            "✅ **إنستغرام (Instagram)**",
+            "✅ Instagram",
             f"🔗 الرابط: {url}",
-            f"📊 تقييم اليوزر: "
-            f"{analyze_username_strength(username)}"
+            f"📊 تقييم اليوزر: {analyze_username_strength(username)}"
         ]
 
         return "\n".join(details)
-
-    except requests.RequestException:
-        pass
 
     except Exception:
         pass
@@ -395,14 +406,16 @@ def check_instagram(username):
 
 
 # =========================================================
-# REDDIT
+# Reddit
 # =========================================================
 
 def check_reddit(username):
 
+    encoded = encode_username(username)
+
     url = (
         f"https://www.reddit.com/user/"
-        f"{encoded_username(username)}/about.json"
+        f"{encoded}/about.json"
     )
 
     headers = {
@@ -425,28 +438,24 @@ def check_reddit(username):
             {}
         )
 
+        account_name = data.get(
+            "name",
+            ""
+        )
+
         if (
-            data
-            and "id" in data
-            and data.get(
-                "name",
-                ""
-            ).lower() == username.lower()
+            data.get("id")
+            and account_name.lower() == username.lower()
         ):
 
             details = [
-                "✅ **ريديت (Reddit)**",
+                "✅ Reddit",
                 f"🔗 الرابط: https://www.reddit.com/user/{username}",
-                f"📊 تقييم اليوزر: "
-                f"{analyze_username_strength(username)}",
-                f"🔥 الكارما الإجمالية: "
-                f"{data.get('total_karma', 0)}"
+                f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
+                f"🔥 الكارما الإجمالية: {data.get('total_karma', 0)}"
             ]
 
             return "\n".join(details)
-
-    except requests.RequestException:
-        pass
 
     except Exception:
         pass
@@ -455,7 +464,7 @@ def check_reddit(username):
 
 
 # =========================================================
-# GENERAL PLATFORM
+# فحص المنصات العامة
 # =========================================================
 
 def check_general_platform(
@@ -464,8 +473,10 @@ def check_general_platform(
     username
 ):
 
+    encoded = encode_username(username)
+
     url = url_template.format(
-        encoded_username(username)
+        encoded
     )
 
     headers = {
@@ -510,16 +521,12 @@ def check_general_platform(
             return None
 
         details = [
-            f"✅ **{name}**",
+            f"✅ {name}",
             f"🔗 الرابط: {url}",
-            f"📊 تقييم اليوزر: "
-            f"{analyze_username_strength(username)}"
+            f"📊 تقييم اليوزر: {analyze_username_strength(username)}"
         ]
 
         return "\n".join(details)
-
-    except requests.RequestException:
-        pass
 
     except Exception:
         pass
@@ -528,31 +535,32 @@ def check_general_platform(
 
 
 # =========================================================
-# START
+# /start
 # =========================================================
 
-@bot.message_handler(commands=["start"])
+@bot.message_handler(
+    commands=["start"]
+)
 def send_welcome(message):
 
     welcome_text = (
-        "👋 **مرحباً بك في أداة البصمة الرقمية!**\n\n"
+        "👋 مرحباً بك في أداة البصمة الرقمية!\n\n"
         "🔍 أرسل اليوزر مباشرة.\n\n"
-        "يدعم مثلاً:\n"
-        "`Lann_100`\n"
-        "`user-name`\n"
-        "`user.name`\n"
-        "`@username`"
+        "أمثلة:\n"
+        "Lann_100\n"
+        "user-name\n"
+        "user.name\n"
+        "@username"
     )
 
     bot.send_message(
         message.chat.id,
-        welcome_text,
-        parse_mode="Markdown"
+        welcome_text
     )
 
 
 # =========================================================
-# SEARCH
+# البحث
 # =========================================================
 
 @bot.message_handler(
@@ -561,10 +569,20 @@ def send_welcome(message):
 def search_username(message):
 
     username = normalize_username(
-        message.text or ""
+        message.text
     )
 
     if not username:
+        return
+
+    # حماية بسيطة من إدخال طويل جدًا
+    if len(username) > 100:
+
+        bot.reply_to(
+            message,
+            "⚠️ اليوزر طويل جدًا."
+        )
+
         return
 
     msg = bot.reply_to(
@@ -572,6 +590,10 @@ def search_username(message):
         f"🔍 جاري الفحص الشامل لـ (@{username})...\n"
         "يرجى الانتظار."
     )
+
+    # =====================================================
+    # جميع المنصات
+    # =====================================================
 
     platforms = {
 
@@ -587,71 +609,88 @@ def search_username(message):
         "reddit": lambda:
             check_reddit(username),
 
+        "github": lambda:
+            check_github(username),
+
         "twitter": lambda:
             check_general_platform(
-                "تويتر / إكس (Twitter)",
+                "Twitter / X",
                 "https://twitter.com/{}",
                 username
             ),
 
         "pinterest": lambda:
             check_general_platform(
-                "بنترست (Pinterest)",
+                "Pinterest",
                 "https://www.pinterest.com/{}/",
                 username
             ),
 
         "twitch": lambda:
             check_general_platform(
-                "تويتش (Twitch)",
+                "Twitch",
                 "https://www.twitch.tv/{}",
                 username
-            ),
-
-        # لا نحذف GitHub من القائمة بسبب "_".
-        # GitHub نفسه سيحدد إذا كان الاسم صالحاً أم لا.
-        "github": lambda:
-            check_github(username)
+            )
     }
+
+    # =====================================================
+    # الفحص
+    # =====================================================
 
     found_results = {}
 
-    for key, func in platforms.items():
+    for key, function in platforms.items():
 
         try:
 
-            result = func()
+            result = function()
 
             if result:
+
                 found_results[key] = result
 
         except Exception:
             continue
 
+    # =====================================================
+    # حذف رسالة الانتظار
+    # =====================================================
+
     try:
+
         bot.delete_message(
             message.chat.id,
             msg.message_id
         )
+
     except Exception:
         pass
+
+    # =====================================================
+    # لا توجد نتائج
+    # =====================================================
 
     if not found_results:
 
         bot.send_message(
             message.chat.id,
-            f"❌ **لم يتم العثور على حسابات مطابقة لـ "
-            f"(@{username}).**",
-            parse_mode="Markdown"
+            f"❌ لم يتم العثور على حسابات مطابقة لـ (@{username})."
         )
 
         return
 
+    # =====================================================
+    # حفظ النتائج
+    # =====================================================
+
     USER_CACHE[message.chat.id] = found_results
 
-    markup = InlineKeyboardMarkup()
+    # =====================================================
+    # أزرار المنصات
+    # =====================================================
 
-    markup.row_width = 2
+    markup = InlineKeyboardMarkup()
 
     platform_names = {
 
@@ -661,41 +700,58 @@ def search_username(message):
 
         "instagram": "📸 إنستغرام",
 
-        "github": "🐙 غيت هاب",
+        "github": "🐙 GitHub",
 
-        "reddit": "🤖 ريديت",
+        "reddit": "🤖 Reddit",
 
-        "twitter": "🐦 تويتر / إكس",
+        "twitter": "🐦 Twitter / X",
 
-        "pinterest": "📌 بنترست",
+        "pinterest": "📌 Pinterest",
 
-        "twitch": "💜 تويتش"
+        "twitch": "💜 Twitch"
     }
 
     buttons = []
 
     for key in found_results.keys():
 
-        buttons.append(
-            InlineKeyboardButton(
-                platform_names.get(key, key),
-                callback_data=f"show_{key}"
-            )
+        button = InlineKeyboardButton(
+            platform_names.get(
+                key,
+                key
+            ),
+            callback_data=f"show_{key}"
         )
 
-    markup.add(*buttons)
+        buttons.append(button)
+
+    # ترتيب الأزرار صفين
+    for i in range(
+        0,
+        len(buttons),
+        2
+    ):
+
+        markup.row(
+            *buttons[i:i + 2]
+        )
+
+    # =====================================================
+    # إرسال النتائج
+    # =====================================================
 
     bot.send_message(
         message.chat.id,
-        f"🎯 **تم العثور على الحساب (@{username}) "
-        f"في المنصات التالية:**",
-        reply_markup=markup,
-        parse_mode="Markdown"
+        (
+            f"🎯 تم العثور على الحساب (@{username}) "
+            "في المنصات التالية:"
+        ),
+        reply_markup=markup
     )
 
 
 # =========================================================
-# CALLBACK
+# الضغط على زر المنصة
 # =========================================================
 
 @bot.callback_query_handler(
@@ -728,32 +784,42 @@ def handle_platform_callback(call):
 
         bot.send_message(
             chat_id,
-            user_data[platform_key],
-            parse_mode="Markdown"
+            user_data[platform_key]
         )
 
     else:
 
         bot.answer_callback_query(
             call.id,
-            "⚠️ انتهت صلاحية الجلسة، "
-            "يرجى إعادة إرسال اليوزر.",
+            "⚠️ انتهت صلاحية النتائج.",
             show_alert=True
         )
 
 
 # =========================================================
-# RUN
+# تشغيل البوت
 # =========================================================
 
 if __name__ == "__main__":
 
-    bot.remove_webhook()
+    print("🚀 Starting OSINT Telegram Bot...")
 
+    # إزالة Webhook القديم
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+
+    # إنشاء Webhook الجديد
     bot.set_webhook(
         url=WEBHOOK_URL
     )
 
+    print(
+        f"✅ Webhook set: {RENDER_URL}"
+    )
+
+    # Render يعطي PORT تلقائيًا
     port = int(
         os.environ.get(
             "PORT",
