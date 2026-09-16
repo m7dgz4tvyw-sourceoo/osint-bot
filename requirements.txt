@@ -1,4 +1,6 @@
-pytelegrambotapi
-requests
+aiogram
+httpx
+pydantic
+pydantic-settings
 beautifulsoup4
-flask
+tenacity
