@@ -1,12 +1,25 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import json
 from concurrent.futures import ThreadPoolExecutor
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from flask import Flask
 
 TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 bot = telebot.TeleBot(TOKEN)
+
+# خادم ويب مصغر لإرضاء متطلبات منصة Render وتشغيل البوت على الخطة المجانية
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "🤖 OSINT Bot is active and running 24/7!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 def analyze_username_strength(username):
     length = len(username)
@@ -107,6 +120,7 @@ def callback_query(call):
         bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بكفاءة عالية على السحابة** ومستعد لاستقبال اليوزرات.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
+import threading
 def search_username(message):
     username = message.text.strip().replace('@', '')
     if not username:
@@ -145,5 +159,10 @@ def search_username(message):
         bot.delete_message(message.chat.id, msg.message_id)
 
 if __name__ == "__main__":
-    print("🤖 البوت يعمل بكامل المزايا...")
+    # تشغيل خادم الويب في الخلفية ليطابق متطلبات Render
+    t = threading.Thread(target=run_web)
+    t.daemon = True
+    t.start()
+    
+    print("🤖 البوت وخادم الويب يعملان بكامل المزايا...")
     bot.infinity_polling()
