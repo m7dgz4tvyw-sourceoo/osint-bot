@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 # =========================================================
 
 # ضع توكن جديد هنا
-TOKEN = "حط_توكن_جديد_هنا"
+TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 
 RENDER_URL = "https://osint-bot-t0vn.onrender.com"
 
