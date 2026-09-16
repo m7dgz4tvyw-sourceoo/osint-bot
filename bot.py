@@ -211,7 +211,6 @@ def send_welcome(message):
 
 @bot.message_handler(func=lambda message: True)
 def search_username(message):
-    # السماح باليوزرات التي تحتوي على حروف، أرقام، شرطة سفلية، ونقاط
     username = message.text.strip().replace('@', '')
     if not username:
         return
@@ -222,19 +221,25 @@ def search_username(message):
         "snapchat": lambda: check_snapchat(username),
         "tiktok": lambda: check_tiktok(username),
         "instagram": lambda: check_instagram(username),
-        "github": lambda: check_github(username),
         "reddit": lambda: check_reddit(username),
         "twitter": lambda: check_general_platform("تويتر / إكس (Twitter)", "https://twitter.com/{}", username),
         "pinterest": lambda: check_general_platform("بنترست (Pinterest)", "https://www.pinterest.com/{}/", username),
         "twitch": lambda: check_general_platform("تويتش (Twitch)", "https://www.twitch.tv/{}", username)
     }
     
+    # استبعاد غيت هاب تلقائياً إذا كان اليوزر يحتوي على شرطة سفلية لتفادي أخطاء النظام
+    if '_' not in username:
+        platforms["github"] = lambda: check_github(username)
+    
     found_results = {}
     
     for key, func in platforms.items():
-        res = func()
-        if res:
-            found_results[key] = res
+        try:
+            res = func()
+            if res:
+                found_results[key] = res
+        except Exception:
+            continue
             
     bot.delete_message(message.chat.id, msg.message_id)
     
