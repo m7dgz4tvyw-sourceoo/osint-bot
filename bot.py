@@ -2,27 +2,30 @@ import os
 import requests
 from bs4 import BeautifulSoup
 import json
-import threading
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from flask import Flask
+from flask import Flask, request
 
 TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 bot = telebot.TeleBot(TOKEN)
 
 app = Flask(__name__)
 
+WEBHOOK_URL = f"https://osint-bot-t0vn.onrender.com/{TOKEN}"
+
 @app.route('/')
 def home():
-    return "🤖 Advanced OSINT Bot is active and running 24/7!"
+    return "🤖 Advanced OSINT Bot with Strict Validation is active and running 24/7!"
 
-def run_bot():
-    try:
-        print("🤖 بوت تيليجرام يبدأ الاتصال...")
-        bot.remove_webhook()
-        bot.infinity_polling(none_stop=True, interval=1, timeout=20)
-    except Exception as e:
-        print(f"Error in bot polling: {e}")
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    else:
+        return '', 403
 
 def analyze_username_strength(username):
     length = len(username)
@@ -42,22 +45,19 @@ def check_github_deep(username):
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             data = res.json()
-            details = [f"✅ **غيت هاب (GitHub - فحص عميق)**\n🔗 الرابط: https://github.com/{username}"]
-            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
-            details.append(f"🆔 المعرف الرقمي (ID): {data.get('id', 'غير متوفر')}")
-            details.append(f"👤 الاسم الكامل: {data.get('name', 'غير محدد')}")
-            details.append(f"🏢 الشركة: {data.get('company', 'لا يوجد')}")
-            details.append(f"📍 الموقع: {data.get('location', 'غير محدد')}")
-            details.append(f"📧 البريد الإلكتروني: {data.get('email', 'غير مخفي/متاح')}")
-            details.append(f"🔗 الموقع الشخصي: {data.get('blog', 'لا يوجد')}")
-            details.append(f"📝 البايو: {data.get('bio', 'لا يوجد')}")
-            details.append(f"📦 المستودعات العامة: {data.get('public_repos', 0)}")
-            details.append(f"gist عامة: {data.get('public_gists', 0)}")
-            details.append(f"👥 المتابعين: {data.get('followers', 0)}")
-            details.append(f"👤 يتابعهم: {data.get('following', 0)}")
-            details.append(f"📅 تاريخ الإنشاء: {data.get('created_at', 'غير متوفر')}")
-            details.append(f"🔄 آخر تحديث للحساب: {data.get('updated_at', 'غير متوفر')}")
-            return "\n".join(details)
+            # التأكد أنه حساب حقيقي وليس منظمة فارغة أو خطأ
+            if data.get("type") == "User" or "id" in data:
+                details = [f"✅ **غيت هاب (GitHub)**\n🔗 الرابط: https://github.com/{username}"]
+                details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+                details.append(f"🆔 المعرف الرقمي (ID): {data.get('id', 'غير متوفر')}")
+                details.append(f"👤 الاسم الكامل: {data.get('name', 'غير محدد')}")
+                details.append(f"🏢 الشركة: {data.get('company', 'لا يوجد')}")
+                details.append(f"📍 الموقع: {data.get('location', 'غير محدد')}")
+                details.append(f"📝 البايو: {data.get('bio', 'لا يوجد')}")
+                details.append(f"📦 المستودعات العامة: {data.get('public_repos', 0)}")
+                details.append(f"👥 المتابعين: {data.get('followers', 0)}")
+                details.append(f"📅 تاريخ الإنشاء: {data.get('created_at', 'غير متوفر')}")
+                return "\n".join(details)
     except Exception:
         pass
     return None
@@ -69,32 +69,29 @@ def check_tiktok_deep(username):
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            details = [f"✅ **تيك توك (TikTok - فحص عميق)**\n🔗 الرابط: {url}"]
-            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
-            
             sig_data = soup.find('script', id='SIGI_STATE')
             if sig_data:
                 try:
                     data = json.loads(sig_data.string)
                     users = data.get('UserModule', {}).get('users', {})
+                    # التحقق من أن اليوزر موجود فعالياً داخل بيانات تيك توك
                     for uid, info in users.items():
-                        details.append(f"👤 الاسم الكامل: {info.get('nickname', 'غير محدد')}")
-                        details.append(f"🆔 المعرّف (ID): {info.get('id', 'غير متوفر')}")
-                        details.append(f"📝 البايو / النبذة: {info.get('signature', 'لا يوجد')}")
-                        details.append(f"🌍 الدولة / المنطقة: {info.get('region', 'غير محدد')}")
-                        details.append(f"🔒 حساب خاص: {'نعم' if info.get('privateAccount') else 'لا'}")
-                        details.append(f"✔️ موثق (Verified): {'نعم' if info.get('verified') else 'لا'}")
-                        details.append(f"🛡️ حساب تجاري: {'نعم' if info.get('commerceUser') else 'لا'}")
-                    stats = data.get('UserModule', {}).get('stats', {})
-                    for uid, stat in stats.items():
-                        details.append(f"👥 المتابعين: {stat.get('followerCount', 'مخفي')}")
-                        details.append(f"👤 يتابعهم: {stat.get('followingCount', 'مخفي')}")
-                        details.append(f"❤️ إجمالي الإعجابات: {stat.get('heart', 'مخفي')}")
-                        details.append(f"🎬 عدد الفيديوهات: {stat.get('videoCount', 'مخفي')}")
-                        details.append(f"⭐ الإعجابات المفضلة: {stat.get('diggCount', 'مخفي')}")
+                        if info.get('uniqueId', '').lower() == username.lower():
+                            details = [f"✅ **تيك توك (TikTok)**\n🔗 الرابط: {url}"]
+                            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+                            details.append(f"👤 الاسم الكامل: {info.get('nickname', 'غير محدد')}")
+                            details.append(f"🆔 المعرّف (ID): {info.get('id', 'غير متوفر')}")
+                            details.append(f"📝 البايو / النبذة: {info.get('signature', 'لا يوجد')}")
+                            details.append(f"🔒 حساب خاص: {'نعم' if info.get('privateAccount') else 'لا'}")
+                            details.append(f"✔️ موثق: {'نعم' if info.get('verified') else 'لا'}")
+                            
+                            stats = data.get('UserModule', {}).get('stats', {}).get(uid, {})
+                            if stats:
+                                details.append(f"👥 المتابعين: {stats.get('followerCount', 'مخفي')}")
+                                details.append(f"❤️ إجمالي الإعجابات: {stats.get('heart', 'مخفي')}")
+                            return "\n".join(details)
                 except Exception:
                     pass
-            return "\n".join(details)
     except Exception:
         pass
     return None
@@ -106,39 +103,13 @@ def check_reddit_deep(username):
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             data = res.json().get('data', {})
-            details = [f"✅ **ريديت (Reddit - فحص عميق)**\n🔗 الرابط: https://www.reddit.com/user/{username}"]
-            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
-            details.append(f"🆔 معرف الحساب (ID): {data.get('id', 'غير متوفر')}")
-            details.append(f"👤 اسم العرض: {data.get('subreddit', {}).get('title', 'غير محدد')}")
-            details.append(f"📝 البايو: {data.get('subreddit', {}).get('public_description', 'لا يوجد')}")
-            details.append(f"⭐ كارما المنشورات: {data.get('link_karma', 0)}")
-            details.append(f"💬 كارما التعليقات: {data.get('comment_karma', 0)}")
-            details.append(f"🔥 الكارما الإجمالية: {data.get('total_karma', 0)}")
-            details.append(f"🤖 حساب موثق/روبوت: {'نعم' if data.get('is_employee') else 'لا'}")
-            details.append(f"📅 تاريخ الانضمام (UTC): {data.get('created_utc', 'غير متوفر')}")
-            return "\n".join(details)
-    except Exception:
-        pass
-    return None
-
-def check_instagram_deep(username):
-    url = f"https://www.instagram.com/{username}/"
-    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            details = [f"✅ **إنستغرام (Instagram - فحص عميق)**\n🔗 الرابط: {url}"]
-            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
-            
-            meta_desc = soup.find('meta', property='og:description')
-            if meta_desc:
-                details.append(f"📌 بيانات وأرقام الحساب:\n{meta_desc.get('content', '')}")
-            
-            title = soup.find('title')
-            if title:
-                details.append(f"📌 عنوان الصفحة الرسمي: {title.text.strip()}")
-            return "\n".join(details)
+            if data and "id" in data:
+                details = [f"✅ **ريديت (Reddit)**\n🔗 الرابط: https://www.reddit.com/user/{username}"]
+                details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+                details.append(f"🆔 معرف الحساب (ID): {data.get('id', 'غير متوفر')}")
+                details.append(f"🔥 الكارما الإجمالية: {data.get('total_karma', 0)}")
+                details.append(f"📅 تاريخ الانضمام (UTC): {data.get('created_utc', 'غير متوفر')}")
+                return "\n".join(details)
     except Exception:
         pass
     return None
@@ -148,18 +119,21 @@ def check_general_platform(name, url_template, username):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0"}
     try:
         res = requests.get(url, headers=headers, timeout=8)
+        # التحقق من أن الصفحة موجودة حقاً وليست صفحة خطأ (404 وهمية برمز 200)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            details = [f"✅ **{name} (فحص عميق)**\n🔗 الرابط: {url}"]
+            text_content = soup.get_text().lower()
+            
+            # كلمات مفتاحية تدل على أن الحساب غير موجود في بعض المنصات
+            not_found_keywords = ["page not found", "user not found", "عذراً، هذه الصفحة غير صالحة", "هذا الحساب غير موجود", "does not exist"]
+            if any(kw in text_content for kw in not_found_keywords):
+                return None
+                
+            details = [f"✅ **{name}**\n🔗 الرابط: {url}"]
             details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
             
-            # استخراج جميع الوصف والميتا للتعمق أكثر
-            meta_desc = soup.find('meta', attrs={'name': 'description'}) or soup.find('meta', property='og:description')
-            if meta_desc:
-                details.append(f"📝 الوصف / البايو المكتشف: {meta_desc.get('content', '').strip()}")
-                
             title = soup.find('title')
-            if title:
+            if title and title.text.strip():
                 details.append(f"📌 عنوان الصفحة: {title.text.strip()}")
                 
             return "\n".join(details)
@@ -177,8 +151,8 @@ def send_welcome(message):
     )
     
     welcome_text = (
-        "👋 **مرحباً بك في أداة البصمة الرقمية المتقدمة (OSINT Pro Deep Scan)!**\n\n"
-        "🔍 **أرسل اليوزر (اسم المستخدم) مباشرة**، وسيقوم البوت بعمل فحص استخباراتي عميق لاستخراج كافة البيانات المتاحة عبر المنصات."
+        "👋 **مرحباً بك في أداة البصمة الرقمية المتقدمة (OSINT Pro)!**\n\n"
+        "🔍 **أرسل اليوزر (اسم المستخدم) مباشرة**، وسيقوم البوت بالبحث والتحقق بدقة من الحسابات الشغالة فقط."
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -186,10 +160,10 @@ def send_welcome(message):
 def callback_query(call):
     if call.data == "help_info":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nاكتب اسم المستخدم بدون علامة @ للحصول على أقصى قدر من المعلومات والتفاصيل المتاحة.", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nاكتب اسم المستخدم بدون علامة @، وسيعرض لك الحسابات المتواجدة والفعالة حصرياً.", parse_mode="Markdown")
     elif call.data == "bot_status":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بكفاءة وبأعلى صلاحيات الفحص العميق 24/7.**", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بنظام فحص دقيق وفلترة للنتائج الوهمية 24/7.**", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def search_username(message):
@@ -197,21 +171,18 @@ def search_username(message):
     if not username:
         return
         
-    msg = bot.reply_to(message, f"🔍 جاري تنفيذ الفحص العميق واستخراج البيانات الكبرى لـ (@{username})... يرجى الانتظار قليلاً.")
+    msg = bot.reply_to(message, f"🔍 جاري الفحص والتحقق من نشاط الحسابات لـ (@{username})... يرجى الانتظار.")
     
     found_any = False
     
-    # تنفيذ الفحوصات العميقة المتتالية
     functions_to_run = [
         lambda: check_github_deep(username),
         lambda: check_tiktok_deep(username),
         lambda: check_reddit_deep(username),
-        lambda: check_instagram_deep(username),
+        lambda: check_general_platform("إنستغرام (Instagram)", "https://www.instagram.com/{}/", username),
         lambda: check_general_platform("تويتر / إكس (Twitter)", "https://twitter.com/{}", username),
-        lambda: check_general_platform("بينترست (Pinterest)", "https://www.pinterest.com/{}/", username),
-        lambda: check_general_platform("ساوند كلاود (SoundCloud)", "https://soundcloud.com/{}", username),
-        lambda: check_general_platform("تويتش (Twitch)", "https://www.twitch.tv/{}", username),
-        lambda: check_general_platform("تيليجرام (Telegram Channel/User)", "https://t.me/{}", username)
+        lambda: check_general_platform("بنترست (Pinterest)", "https://www.pinterest.com/{}/", username),
+        lambda: check_general_platform("تويتش (Twitch)", "https://www.twitch.tv/{}", username)
     ]
     
     for func in functions_to_run:
@@ -220,15 +191,14 @@ def search_username(message):
             found_any = True
             bot.send_message(message.chat.id, res, parse_mode="Markdown")
             
+    bot.delete_message(message.chat.id, msg.message_id)
+    
     if not found_any:
-        bot.send_message(message.chat.id, f"❌ لم يتم العثور على أي حسابات نشطة مطابقة لـ (@{username}).", parse_mode="Markdown")
-    else:
-        bot.delete_message(message.chat.id, msg.message_id)
+        bot.send_message(message.chat.id, f"❌ **لم يتم العثور على أي حسابات نشطة أو حقيقية مطابقة لـ (@{username}).**", parse_mode="Markdown")
 
 if __name__ == "__main__":
-    t = threading.Thread(target=run_bot)
-    t.daemon = True
-    t.start()
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
     
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
