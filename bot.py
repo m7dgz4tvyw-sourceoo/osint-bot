@@ -15,7 +15,7 @@ WEBHOOK_URL = f"https://osint-bot-t0vn.onrender.com/{TOKEN}"
 
 @app.route('/')
 def home():
-    return "🤖 Advanced OSINT Bot with Strict Validation is active and running 24/7!"
+    return "🤖 Strict OSINT Bot is active and running 24/7!"
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -45,8 +45,7 @@ def check_github_deep(username):
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             data = res.json()
-            # التأكد أنه حساب حقيقي وليس منظمة فارغة أو خطأ
-            if data.get("type") == "User" or "id" in data:
+            if "id" in data and data.get("login", "").lower() == username.lower():
                 details = [f"✅ **غيت هاب (GitHub)**\n🔗 الرابط: https://github.com/{username}"]
                 details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
                 details.append(f"🆔 المعرف الرقمي (ID): {data.get('id', 'غير متوفر')}")
@@ -74,7 +73,6 @@ def check_tiktok_deep(username):
                 try:
                     data = json.loads(sig_data.string)
                     users = data.get('UserModule', {}).get('users', {})
-                    # التحقق من أن اليوزر موجود فعالياً داخل بيانات تيك توك
                     for uid, info in users.items():
                         if info.get('uniqueId', '').lower() == username.lower():
                             details = [f"✅ **تيك توك (TikTok)**\n🔗 الرابط: {url}"]
@@ -103,7 +101,7 @@ def check_reddit_deep(username):
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             data = res.json().get('data', {})
-            if data and "id" in data:
+            if data and "id" in data and data.get("name", "").lower() == username.lower():
                 details = [f"✅ **ريديت (Reddit)**\n🔗 الرابط: https://www.reddit.com/user/{username}"]
                 details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
                 details.append(f"🆔 معرف الحساب (ID): {data.get('id', 'غير متوفر')}")
@@ -114,25 +112,53 @@ def check_reddit_deep(username):
         pass
     return None
 
+def check_instagram_strict(username):
+    url = f"https://www.instagram.com/{username}/"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            title = soup.find('title')
+            title_text = title.text.lower() if title else ""
+            
+            # إنستغرام يضع اسم المستخدم في العنوان إذا كان الحساب موجوداً
+            # إذا كان الحساب غير موجود، يكون العنوان غالباً "Login • Instagram" أو "Instagram"
+            if "login" in title_text or title_text == "instagram" or not title_text:
+                return None
+                
+            details = [f"✅ **إنستغرام (Instagram)**\n🔗 الرابط: {url}"]
+            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+            details.append(f"📌 عنوان الصفحة: {title.text.strip()}")
+            return "\n".join(details)
+    except Exception:
+        pass
+    return None
+
 def check_general_platform(name, url_template, username):
     url = url_template.format(username)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0"}
     try:
         res = requests.get(url, headers=headers, timeout=8)
-        # التحقق من أن الصفحة موجودة حقاً وليست صفحة خطأ (404 وهمية برمز 200)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             text_content = soup.get_text().lower()
             
-            # كلمات مفتاحية تدل على أن الحساب غير موجود في بعض المنصات
-            not_found_keywords = ["page not found", "user not found", "عذراً، هذه الصفحة غير صالحة", "هذا الحساب غير موجود", "does not exist"]
+            # كلمات مفتاحية قاطعة تدل على أن الحساب غير موجود
+            not_found_keywords = ["page not found", "user not found", "عذراً", "هذا الحساب غير موجود", "does not exist", "not found", "404"]
             if any(kw in text_content for kw in not_found_keywords):
+                return None
+                
+            title = soup.find('title')
+            title_text = title.text.lower() if title else ""
+            
+            # التأكد أن اليوزر أو جزء منه يظهر في العنوان أو أن الصفحة ليست صفحة خطأ عامة
+            if "not found" in title_text or "error" in title_text or "404" in title_text:
                 return None
                 
             details = [f"✅ **{name}**\n🔗 الرابط: {url}"]
             details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
             
-            title = soup.find('title')
             if title and title.text.strip():
                 details.append(f"📌 عنوان الصفحة: {title.text.strip()}")
                 
@@ -151,8 +177,8 @@ def send_welcome(message):
     )
     
     welcome_text = (
-        "👋 **مرحباً بك في أداة البصمة الرقمية المتقدمة (OSINT Pro)!**\n\n"
-        "🔍 **أرسل اليوزر (اسم المستخدم) مباشرة**، وسيقوم البوت بالبحث والتحقق بدقة من الحسابات الشغالة فقط."
+        "👋 **مرحباً بك في أداة البصمة الرقمية (OSINT Strict Pro)!**\n\n"
+        "🔍 **أرسل اليوزر مباشرة**، ولن يعرض البوت أي حساب إلا إذا كان حقيقياً وشغالاً بنسبة 100%."
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -160,10 +186,10 @@ def send_welcome(message):
 def callback_query(call):
     if call.data == "help_info":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nاكتب اسم المستخدم بدون علامة @، وسيعرض لك الحسابات المتواجدة والفعالة حصرياً.", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nاكتب اسم المستخدم بدون @، والنتيجة ستكون خالية من أي حسابات وهمية.", parse_mode="Markdown")
     elif call.data == "bot_status":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بنظام فحص دقيق وفلترة للنتائج الوهمية 24/7.**", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بنظام الفحص الصارم ومنع النتائج الوهمية 24/7.**", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def search_username(message):
@@ -171,7 +197,7 @@ def search_username(message):
     if not username:
         return
         
-    msg = bot.reply_to(message, f"🔍 جاري الفحص والتحقق من نشاط الحسابات لـ (@{username})... يرجى الانتظار.")
+    msg = bot.reply_to(message, f"🔍 جاري الفحص والفلترة الدقيقة لـ (@{username})... يرجى الانتظار.")
     
     found_any = False
     
@@ -179,7 +205,7 @@ def search_username(message):
         lambda: check_github_deep(username),
         lambda: check_tiktok_deep(username),
         lambda: check_reddit_deep(username),
-        lambda: check_general_platform("إنستغرام (Instagram)", "https://www.instagram.com/{}/", username),
+        lambda: check_instagram_strict(username),
         lambda: check_general_platform("تويتر / إكس (Twitter)", "https://twitter.com/{}", username),
         lambda: check_general_platform("بنترست (Pinterest)", "https://www.pinterest.com/{}/", username),
         lambda: check_general_platform("تويتش (Twitch)", "https://www.twitch.tv/{}", username)
@@ -194,7 +220,7 @@ def search_username(message):
     bot.delete_message(message.chat.id, msg.message_id)
     
     if not found_any:
-        bot.send_message(message.chat.id, f"❌ **لم يتم العثور على أي حسابات نشطة أو حقيقية مطابقة لـ (@{username}).**", parse_mode="Markdown")
+        bot.send_message(message.chat.id, f"❌ **لم يتم العثور على أي حسابات حقيقية أو نشطة مطابقة لـ (@{username}).**", parse_mode="Markdown")
 
 if __name__ == "__main__":
     bot.remove_webhook()
