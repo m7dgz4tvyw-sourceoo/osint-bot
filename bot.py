@@ -2,7 +2,7 @@ import os
 import requests
 from bs4 import BeautifulSoup
 import json
-from concurrent.futures import ThreadPoolExecutor
+import threading
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask
@@ -10,16 +10,16 @@ from flask import Flask
 TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 bot = telebot.TeleBot(TOKEN)
 
-# خادم ويب مصغر لإرضاء متطلبات منصة Render وتشغيل البوت على الخطة المجانية
-app = Flask('')
+# إنشاء خادم الويب الأساسي ليلتقطه فاحص منافذ Render فوراً
+app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "🤖 OSINT Bot is active and running 24/7!"
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+def run_bot():
+    print("🤖 بوت تيليجرام يعمل الآن...")
+    bot.infinity_polling()
 
 def analyze_username_strength(username):
     length = len(username)
@@ -120,7 +120,6 @@ def callback_query(call):
         bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بكفاءة عالية على السحابة** ومستعد لاستقبال اليوزرات.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
-import threading
 def search_username(message):
     username = message.text.strip().replace('@', '')
     if not username:
@@ -159,10 +158,11 @@ def search_username(message):
         bot.delete_message(message.chat.id, msg.message_id)
 
 if __name__ == "__main__":
-    # تشغيل خادم الويب في الخلفية ليطابق متطلبات Render
-    t = threading.Thread(target=run_web)
-    t.daemon = True
-    t.start()
+    # تشغيل بوت تيليجرام في الخلفية
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
     
-    print("🤖 البوت وخادم الويب يعملان بكامل المزايا...")
-    bot.infinity_polling()
+    # تشغيل خادم الويب على المنفذ المطلوب لتراها منصة Render فوراً
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
