@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🤖 OSINT Bot is active and running 24/7!"
+    return "🤖 Advanced OSINT Bot is active and running 24/7!"
 
 def run_bot():
     try:
@@ -26,13 +26,13 @@ def run_bot():
 def analyze_username_strength(username):
     length = len(username)
     if length == 3:
-        return "ثلاثي (مميز جداً ونادر)"
+        return "ثلاثي (مميز جداً ونادر 🔥)"
     elif length == 4:
-        return "رباعي (مميز وقيم)"
+        return "رباعي (مميز وقيم 💎)"
     elif length <= 6:
-        return "قصير ومميز"
+        return "قصير ومميز ✨"
     else:
-        return "عادي طويل"
+        return "عادي طويل 📌"
 
 def check_tiktok_deep(username):
     url = f"https://www.tiktok.com/@{username}"
@@ -50,18 +50,86 @@ def check_tiktok_deep(username):
                     data = json.loads(sig_data.string)
                     users = data.get('UserModule', {}).get('users', {})
                     for uid, info in users.items():
-                        details.append(f"👤 الاسم: {info.get('nickname', 'غير محدد')}")
-                        details.append(f"🆔 المعرّف: {info.get('id', 'غير متوفر')}")
-                        details.append(f"📝 النبذة: {info.get('signature', 'لا يوجد')}")
+                        details.append(f"👤 الاسم الكامل: {info.get('nickname', 'غير محدد')}")
+                        details.append(f"🆔 المعرّف (ID): {info.get('id', 'غير متوفر')}")
+                        details.append(f"📝 البايو / النبذة: {info.get('signature', 'لا يوجد')}")
+                        details.append(f"🔒 حساب خاص: {'نعم' if info.get('privateAccount') else 'لا'}")
+                        details.append(f"✔️ موثق: {'نعم' if info.get('verified') else 'لا'}")
                     stats = data.get('UserModule', {}).get('stats', {})
                     for uid, stat in stats.items():
                         details.append(f"👥 المتابعين: {stat.get('followerCount', 'مخفي')}")
+                        details.append(f"👤 يتابعهم: {stat.get('followingCount', 'مخفي')}")
+                        details.append(f"❤️ إجمالي الإعجابات: {stat.get('heart', 'مخفي')}")
+                        details.append(f"🎬 عدد الفيديوهات: {stat.get('videoCount', 'مخفي')}")
                 except Exception:
                     pass
             return "\n".join(details)
     except Exception:
         pass
     return None
+
+def check_instagram_deep(username):
+    url = f"https://www.instagram.com/{username}/"
+    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            details = [f"✅ **إنستغرام (Instagram)**\n🔗 الرابط: {url}"]
+            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+            
+            # محاولة استخراج الوصف من Meta Tags
+            meta_desc = soup.find('meta', property='og:description')
+            if meta_desc:
+                details.append(f"📌 معلومات الحساب والملخص:\n{meta_desc.get('content', '')}")
+            
+            title = soup.find('title')
+            if title:
+                details.append(f"📌 عنوان الصفحة: {title.text.strip()}")
+            return "\n".join(details)
+    except Exception:
+        pass
+    return None
+
+def check_github_deep(username):
+    url = f"https://api.github.com/users/{username}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            details = [f"✅ **غيت هاب (GitHub)**\n🔗 الرابط: https://github.com/{username}"]
+            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+            details.append(f"👤 الاسم: {data.get('name', 'غير محدد')}")
+            details.append(f"🏢 الشركة: {data.get('company', 'لا يوجد')}")
+            details.append(f"📍 الموقع الجغرافي: {data.get('location', 'غير محدد')}")
+            details.append(f"📝 نبذة المنشئ: {data.get('bio', 'لا يوجد')}")
+            details.append(f"📦 المستودعات العامة: {data.get('public_repos', 0)}")
+            details.append(f"👥 المتابعين: {data.get('followers', 0)}")
+            details.append(f"👤 يتابعهم: {data.get('following', 0)}")
+            details.append(f"📅 تاريخ إنشاء الحساب: {data.get('created_at', 'غير متوفر')}")
+            return "\n".join(details)
+    except Exception:
+        pass
+    return None
+
+def check_reddit_deep(username):
+    url = f"https://www.reddit.com/user/{username}/about.json"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json().get('data', {})
+            details = [f"✅ **ريديت (Reddit)**\n🔗 الرابط: https://www.reddit.com/user/{username}"]
+            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+            details.append(f"🆔 معرف الحساب (ID): {data.get('id', 'غير متوفر')}")
+            details.append(f"karma ⭐ الكارما الإجمالية: {data.get('total_karma', 0)}")
+            details.append(f"📅 تاريخ الانضمام: {data.get('created_utc', 'غير متوفر')}")
+            return "\n".join(details)
+    except Exception:
+        pass
+    # فحص احتياطي عبر HTML إذا فشل الـ API
+    return check_general_platform("ريديت (Reddit)", "https://www.reddit.com/user/{}", username)
 
 def check_snapchat_deep(username):
     url = f"https://www.snapchat.com/add/{username}"
@@ -74,7 +142,7 @@ def check_snapchat_deep(username):
             details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
             title = soup.find('title')
             if title:
-                details.append(f"📌 العنوان: {title.text.strip()}")
+                details.append(f"📌 عنوان الحساب: {title.text.strip()}")
             return "\n".join(details)
     except Exception:
         pass
@@ -107,8 +175,8 @@ def send_welcome(message):
     )
     
     welcome_text = (
-        "👋 **مرحباً بك في أداة البصمة الرقمية المتقدمة!**\n\n"
-        "🔍 **فضلاً، أرسل اليوزر (اسم المستخدم) مباشرة** لنبدأ فحص الحسابات وإرسال كل نتيجة في رسالة منفصلة."
+        "👋 **مرحباً بك في أداة البصمة الرقمية المتقدمة (OSINT Pro)!**\n\n"
+        "🔍 **أرسل اليوزر (اسم المستخدم) مباشرة**، وسيقوم البوت باستخراج تقارير ومعلومات تفصيلية وشاملة لكل منصة."
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -116,10 +184,10 @@ def send_welcome(message):
 def callback_query(call):
     if call.data == "help_info":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nفقط قم بكتابة وإرسال اسم المستخدم (اليوزر) بدون علامة @، وسيقوم البوت بفحصه وإرسال تقرير لكل منصة بشكل مستقل.", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nاكتب اسم المستخدم بدون علامة @ للحصول على تقرير استخباراتي عميق وشامل لكل الحسابات المرتبطة به.", parse_mode="Markdown")
     elif call.data == "bot_status":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بكفاءة عالية على السحابة** ومستعد لاستقبال اليوزرات.", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بكفاءة 24/7 على السحابة ومستعد للفحص العميق.**", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def search_username(message):
@@ -127,25 +195,43 @@ def search_username(message):
     if not username:
         return
         
-    msg = bot.reply_to(message, f"🔍 جاري فحص (@{username}) وإرسال النتائج تباعاً...")
+    msg = bot.reply_to(message, f"🔍 جاري جمع وتحليل البصمة الرقمية الشاملة لـ (@{username})... قد يستغرق بضع ثوانٍ.")
     
     found_any = False
     
+    # 1. فحص غيت هاب (معلومات تفصيلية غنية جداً)
+    gh_res = check_github_deep(username)
+    if gh_res:
+        found_any = True
+        bot.send_message(message.chat.id, gh_res, parse_mode="Markdown")
+
+    # 2. فحص تيك توك (معلومات وبيانات دقيقة)
+    tiktok_res = check_tiktok_deep(username)
+    if tiktok_res:
+        found_any = True
+        bot.send_message(message.chat.id, tiktok_res, parse_mode="Markdown")
+
+    # 3. فحص إنستغرام (بيانات متقدمة)
+    ig_res = check_instagram_deep(username)
+    if ig_res:
+        found_any = True
+        bot.send_message(message.chat.id, ig_res, parse_mode="Markdown")
+
+    # 4. فحص ريديت
+    reddit_res = check_reddit_deep(username)
+    if reddit_res:
+        found_any = True
+        bot.send_message(message.chat.id, reddit_res, parse_mode="Markdown")
+
+    # 5. سناب شات
     snap_res = check_snapchat_deep(username)
     if snap_res:
         found_any = True
         bot.send_message(message.chat.id, snap_res, parse_mode="Markdown")
         
-    tiktok_res = check_tiktok_deep(username)
-    if tiktok_res:
-        found_any = True
-        bot.send_message(message.chat.id, tiktok_res, parse_mode="Markdown")
-        
+    # 6. منصات أخرى
     other_platforms = {
-        "إنستغرام (Instagram)": "https://www.instagram.com/{}/",
-        "تويتر / إكس (Twitter)": "https://twitter.com/{}",
-        "غيت هاب (GitHub)": "https://github.com/{}",
-        "ريديت (Reddit)": "https://www.reddit.com/user/{}"
+        "تويتر / إكس (Twitter)": "https://twitter.com/{}"
     }
     
     for name, template in other_platforms.items():
@@ -160,11 +246,9 @@ def search_username(message):
         bot.delete_message(message.chat.id, msg.message_id)
 
 if __name__ == "__main__":
-    # تشغيل البوت في خيط خلفي مستقل تماماً
     t = threading.Thread(target=run_bot)
     t.daemon = True
     t.start()
     
-    # تشغيل خادم Flask بشكل أساسي ليفتح المنفذ وتستجيب المنصة فورا
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
