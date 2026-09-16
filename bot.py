@@ -13,12 +13,11 @@ app = Flask(__name__)
 
 WEBHOOK_URL = f"https://osint-bot-t0vn.onrender.com/{TOKEN}"
 
-# تخزين مؤقت لنتائج الفحص لكل مستخدم لسرعة العرض عند الضغط على الأزرار
 USER_CACHE = {}
 
 @app.route('/')
 def home():
-    return "🤖 Interactive OSINT Bot is active and running 24/7!"
+    return "🤖 Interactive OSINT Bot with Special Characters Support is active!"
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -95,8 +94,6 @@ def check_tiktok(username):
                             if stats:
                                 details.append(f"👥 المتابعين: {stats.get('followerCount', 'مخفي')}")
                                 details.append(f"❤️ إجمالي الإعجابات: {stats.get('heart', 'مخفي')}")
-                            
-                            details.append("\n🎥 **المقاطع والفيديوهات:**\n- يتم جلب أحدث الفيديوهات المتاحة من الحساب العام مباشرة عبر الرابط الرئيسي نظراً لقيود حماية المنصة.")
                             return "\n".join(details)
                 except Exception:
                     pass
@@ -124,7 +121,7 @@ def check_snapchat(username):
                 f"✅ **سناب شات (Snapchat)**",
                 f"🔗 الرابط: {url}",
                 f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
-                f"👻 **القصص (Stories):** يمكنك فتح الرابط أعلاه لمشاهدة القصص العامة النشطة للحساب مباشرة.",
+                f"👻 **القصص (Stories):** يمكنك فتح الرابط أعلاه لمشاهدة القصص العامة النشطة للحساب.",
                 f"📌 عنوان الصفحة: {title.text.strip() if title else 'متوفر'}"
             ]
             return "\n".join(details)
@@ -148,8 +145,7 @@ def check_instagram(username):
                 f"✅ **إنستغرام (Instagram)**",
                 f"🔗 الرابط: {url}",
                 f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
-                f"📌 عنوان الصفحة: {title.text.strip() if title else 'متوفر'}",
-                f"📸 **المنشورات والقصص (Posts & Stories):** متاح للاستعراض المباشر عبر تطبيق إنستغرام أو الرابط الرسمي."
+                f"📌 عنوان الصفحة: {title.text.strip() if title else 'متوفر'}"
             ]
             return "\n".join(details)
     except Exception:
@@ -209,12 +205,13 @@ def check_general_platform(name, url_template, username):
 def send_welcome(message):
     welcome_text = (
         "👋 **مرحباً بك في أداة البصمة الرقمية التفاعلية!**\n\n"
-        "🔍 **أرسل اليوزر مباشرة** (بدون @)، وسأقوم بالبحث عنه وإعطائك قائمة بالبرامج التي تم العثور على الحساب فيها."
+        "🔍 **أرسل اليوزر مباشرة** (يدعم الحروف، الأرقام، والشرطات السفلية `_` والنقاط `.`)."
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def search_username(message):
+    # السماح باليوزرات التي تحتوي على حروف، أرقام، شرطة سفلية، ونقاط
     username = message.text.strip().replace('@', '')
     if not username:
         return
@@ -228,7 +225,7 @@ def search_username(message):
         "github": lambda: check_github(username),
         "reddit": lambda: check_reddit(username),
         "twitter": lambda: check_general_platform("تويتر / إكس (Twitter)", "https://twitter.com/{}", username),
-        "pinterest": lambda: check_pinterest(username) if 'check_pinterest' in globals() else check_general_platform("بنترست (Pinterest)", "https://www.pinterest.com/{}/", username),
+        "pinterest": lambda: check_general_platform("بنترست (Pinterest)", "https://www.pinterest.com/{}/", username),
         "twitch": lambda: check_general_platform("تويتش (Twitch)", "https://www.twitch.tv/{}", username)
     }
     
@@ -242,13 +239,11 @@ def search_username(message):
     bot.delete_message(message.chat.id, msg.message_id)
     
     if not found_results:
-        bot.send_message(message.chat.id, f"❌ **لم يتم العثور على أي حسابات حقيقية أو نشطة مطابقة لـ (@{username}).**", parse_mode="Markdown")
+        bot.send_message(message.chat.id, f"❌ **لم يتم العثور على أي حسابات مطابقة لـ (@{username}).**", parse_mode="Markdown")
         return
         
-    # حفظ النتائج في الذاكرة المؤقتة الخاصة بهذا المستخدم
     USER_CACHE[message.chat.id] = found_results
     
-    # بناء الأزرار التفاعلية للمنصات الموجودة فقط
     markup = InlineKeyboardMarkup()
     markup.row_width = 2
     
@@ -259,7 +254,7 @@ def search_username(message):
         "github": "🐙 غيت هاب",
         "reddit": "🤖 ريديت",
         "twitter": "🐦 تويتر / إكس",
-        "pinterest": "ピン بنترست",
+        "pinterest": "📌 بنترست",
         "twitch": "💜 تويتتش"
     }
     
@@ -272,7 +267,7 @@ def search_username(message):
     
     bot.send_message(
         message.chat.id,
-        f"🎯 **تم العثور على الحساب (@{username}) في المنصات التالية:**\nاضغط على أي زر لفتح تفاصيل البرنامج والمعلومات الكاملة والمقاطع:",
+        f"🎯 **تم العثور على الحساب (@{username}) في المنصات التالية:**\nاضغط على أي زر لعرض التفاصيل والمعلومات:",
         reply_markup=markup,
         parse_mode="Markdown"
     )
