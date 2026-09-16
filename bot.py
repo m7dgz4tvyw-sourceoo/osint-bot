@@ -17,7 +17,7 @@ USER_CACHE = {}
 
 @app.route('/')
 def home():
-    return "🤖 Interactive OSINT Bot with Special Characters Support is active!"
+    return "🤖 OSINT Bot with Underscore Support is active!"
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -52,14 +52,10 @@ def check_github(username):
                     f"✅ **غيت هاب (GitHub)**",
                     f"🔗 الرابط: https://github.com/{username}",
                     f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
-                    f"🆔 المعرف الرقمي (ID): {data.get('id', 'غير متوفر')}",
+                    f"🆔 المعرف الرقمي: {data.get('id', 'غير متوفر')}",
                     f"👤 الاسم الكامل: {data.get('name', 'غير محدد')}",
-                    f"🏢 الشركة: {data.get('company', 'لا يوجد')}",
-                    f"📍 الموقع: {data.get('location', 'غير محدد')}",
-                    f"📝 البايو: {data.get('bio', 'لا يوجد')}",
-                    f"📦 المستودعات العامة: {data.get('public_repos', 0)}",
-                    f"👥 المتابعين: {data.get('followers', 0)}",
-                    f"📅 تاريخ الإنشاء: {data.get('created_at', 'غير متوفر')}"
+                    f"📦 المستودعات: {data.get('public_repos', 0)}",
+                    f"👥 المتابعين: {data.get('followers', 0)}"
                 ]
                 return "\n".join(details)
     except Exception:
@@ -85,15 +81,11 @@ def check_tiktok(username):
                                 f"🔗 الرابط: {url}",
                                 f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
                                 f"👤 الاسم الكامل: {info.get('nickname', 'غير محدد')}",
-                                f"🆔 المعرّف (ID): {info.get('id', 'غير متوفر')}",
-                                f"📝 البايو / النبذة: {info.get('signature', 'لا يوجد')}",
-                                f"🔒 حساب خاص: {'نعم' if info.get('privateAccount') else 'لا'}",
-                                f"✔️ موثق: {'نعم' if info.get('verified') else 'لا'}"
+                                f"📝 البايو: {info.get('signature', 'لا يوجد')}"
                             ]
                             stats = data.get('UserModule', {}).get('stats', {}).get(uid, {})
                             if stats:
                                 details.append(f"👥 المتابعين: {stats.get('followerCount', 'مخفي')}")
-                                details.append(f"❤️ إجمالي الإعجابات: {stats.get('heart', 'مخفي')}")
                             return "\n".join(details)
                 except Exception:
                     pass
@@ -109,20 +101,15 @@ def check_snapchat(username):
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             text_content = soup.get_text().lower()
-            not_found_keywords = ["sorry", "not found", "تعذر العثور", "هذا الحساب غير موجود", "doesn't exist", "oops"]
+            not_found_keywords = ["sorry", "not found", "تعذر العثور", "هذا الحساب غير موجود", "doesn't exist"]
             if any(kw in text_content for kw in not_found_keywords):
                 return None
             title = soup.find('title')
-            title_text = title.text.lower() if title else ""
-            if "not found" in title_text or "error" in title_text:
-                return None
-                
             details = [
                 f"✅ **سناب شات (Snapchat)**",
                 f"🔗 الرابط: {url}",
                 f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
-                f"👻 **القصص (Stories):** يمكنك فتح الرابط أعلاه لمشاهدة القصص العامة النشطة للحساب.",
-                f"📌 عنوان الصفحة: {title.text.strip() if title else 'متوفر'}"
+                f"👻 يمكنك فتح الرابط أعلاه مباشرة للتحقق من الحساب."
             ]
             return "\n".join(details)
     except Exception:
@@ -140,12 +127,10 @@ def check_instagram(username):
             title_text = title.text.lower() if title else ""
             if "login" in title_text or title_text == "instagram" or not title_text:
                 return None
-                
             details = [
                 f"✅ **إنستغرام (Instagram)**",
                 f"🔗 الرابط: {url}",
-                f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
-                f"📌 عنوان الصفحة: {title.text.strip() if title else 'متوفر'}"
+                f"📊 تقييم اليوزر: {analyze_username_strength(username)}"
             ]
             return "\n".join(details)
     except Exception:
@@ -164,9 +149,7 @@ def check_reddit(username):
                     f"✅ **ريديت (Reddit)**",
                     f"🔗 الرابط: https://www.reddit.com/user/{username}",
                     f"📊 تقييم اليوزر: {analyze_username_strength(username)}",
-                    f"🆔 معرف الحساب (ID): {data.get('id', 'غير متوفر')}",
-                    f"🔥 الكارما الإجمالية: {data.get('total_karma', 0)}",
-                    f"📅 تاريخ الانضمام (UTC): {data.get('created_utc', 'غير متوفر')}"
+                    f"🔥 الكارما الإجمالية: {data.get('total_karma', 0)}"
                 ]
                 return "\n".join(details)
     except Exception:
@@ -181,21 +164,14 @@ def check_general_platform(name, url_template, username):
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             text_content = soup.get_text().lower()
-            not_found_keywords = ["page not found", "user not found", "عذراً", "هذا الحساب غير موجود", "does not exist", "not found", "404"]
+            not_found_keywords = ["page not found", "user not found", "عذراً", "هذا الحساب غير موجود", "does not exist", "404"]
             if any(kw in text_content for kw in not_found_keywords):
                 return None
-            title = soup.find('title')
-            title_text = title.text.lower() if title else ""
-            if "not found" in title_text or "error" in title_text or "404" in title_text:
-                return None
-                
             details = [
                 f"✅ **{name}**",
                 f"🔗 الرابط: {url}",
                 f"📊 تقييم اليوزر: {analyze_username_strength(username)}"
             ]
-            if title and title.text.strip():
-                details.append(f"📌 عنوان الصفحة: {title.text.strip()}")
             return "\n".join(details)
     except Exception:
         pass
@@ -204,8 +180,8 @@ def check_general_platform(name, url_template, username):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
-        "👋 **مرحباً بك في أداة البصمة الرقمية التفاعلية!**\n\n"
-        "🔍 **أرسل اليوزر مباشرة** (يدعم الحروف، الأرقام، والشرطات السفلية `_` والنقاط `.`)."
+        "👋 **مرحباً بك في أداة البصمة الرقمية!**\n\n"
+        "🔍 **أرسل اليوزر مباشرة** (يدعم الحروف، الأرقام، والشرطات السفلية مثل `Lann_100`)."
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
 
@@ -215,7 +191,7 @@ def search_username(message):
     if not username:
         return
         
-    msg = bot.reply_to(message, f"🔍 جاري الفحص الشامل لـ (@{username})... يرجى الانتظار قليلاً.")
+    msg = bot.reply_to(message, f"🔍 جاري الفحص الشامل لـ (@{username})... يرجى الانتظار.")
     
     platforms = {
         "snapchat": lambda: check_snapchat(username),
@@ -227,12 +203,11 @@ def search_username(message):
         "twitch": lambda: check_general_platform("تويتش (Twitch)", "https://www.twitch.tv/{}", username)
     }
     
-    # استبعاد غيت هاب تلقائياً إذا كان اليوزر يحتوي على شرطة سفلية لتفادي أخطاء النظام
+    # الشرط الذكي: استبعاد غيت هاب إذا وجدنا شرطة سفلية لتفادي رفض المنصة للطلب
     if '_' not in username:
         platforms["github"] = lambda: check_github(username)
     
     found_results = {}
-    
     for key, func in platforms.items():
         try:
             res = func()
@@ -263,16 +238,12 @@ def search_username(message):
         "twitch": "💜 تويتتش"
     }
     
-    buttons = []
-    for key in found_results.keys():
-        btn_text = platform_names.get(key, key)
-        buttons.append(InlineKeyboardButton(btn_text, callback_data=f"show_{key}"))
-        
+    buttons = [InlineKeyboardButton(platform_names.get(key, key), callback_data=f"show_{key}") for key in found_results.keys()]
     markup.add(*buttons)
     
     bot.send_message(
         message.chat.id,
-        f"🎯 **تم العثور على الحساب (@{username}) في المنصات التالية:**\nاضغط على أي زر لعرض التفاصيل والمعلومات:",
+        f"🎯 **تم العثور على الحساب (@{username}) في المنصات التالية:**",
         reply_markup=markup,
         parse_mode="Markdown"
     )
@@ -287,7 +258,7 @@ def handle_platform_callback(call):
         bot.answer_callback_query(call.id, "✅ يتم تحميل التفاصيل...")
         bot.send_message(chat_id, user_data[platform_key], parse_mode="Markdown")
     else:
-        bot.answer_callback_query(call.id, "⚠️ انتهت صلاحية الجلسة، يرجى إعادة إرسال اليوزر من جديد.", show_alert=True)
+        bot.answer_callback_query(call.id, "⚠️ انتهت صلاحية الجلسة، يرجى إعادة إرسال اليوزر.", show_alert=True)
 
 if __name__ == "__main__":
     bot.remove_webhook()
