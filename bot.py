@@ -15,7 +15,7 @@ WEBHOOK_URL = f"https://osint-bot-t0vn.onrender.com/{TOKEN}"
 
 @app.route('/')
 def home():
-    return "🤖 Strict OSINT Bot is active and running 24/7!"
+    return "🤖 Strict OSINT Bot with Snapchat is active and running 24/7!"
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -94,6 +94,36 @@ def check_tiktok_deep(username):
         pass
     return None
 
+def check_snapchat_strict(username):
+    url = f"https://www.snapchat.com/add/{username}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            text_content = soup.get_text().lower()
+            
+            # إذا كان الحساب غير موجود في سناب شات، تظهر عبارات تدل على الخطأ أو عدم العثور
+            not_found_keywords = ["sorry", "not found", "تعذر العثور", "هذا الحساب غير موجود", "doesn't exist", "oops"]
+            if any(kw in text_content for kw in not_found_keywords):
+                return None
+                
+            title = soup.find('title')
+            title_text = title.text.lower() if title else ""
+            
+            if "not found" in title_text or "error" in title_text:
+                return None
+                
+            details = [f"✅ **سناب شات (Snapchat)**\n🔗 الرابط: {url}"]
+            details.append(f"📊 تقييم اليوزر: {analyze_username_strength(username)}")
+            if title and title.text.strip():
+                details.append(f"📌 عنوان الصفحة: {title.text.strip()}")
+                
+            return "\n".join(details)
+    except Exception:
+        pass
+    return None
+
 def check_reddit_deep(username):
     url = f"https://www.reddit.com/user/{username}/about.json"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -122,8 +152,6 @@ def check_instagram_strict(username):
             title = soup.find('title')
             title_text = title.text.lower() if title else ""
             
-            # إنستغرام يضع اسم المستخدم في العنوان إذا كان الحساب موجوداً
-            # إذا كان الحساب غير موجود، يكون العنوان غالباً "Login • Instagram" أو "Instagram"
             if "login" in title_text or title_text == "instagram" or not title_text:
                 return None
                 
@@ -144,7 +172,6 @@ def check_general_platform(name, url_template, username):
             soup = BeautifulSoup(res.text, 'html.parser')
             text_content = soup.get_text().lower()
             
-            # كلمات مفتاحية قاطعة تدل على أن الحساب غير موجود
             not_found_keywords = ["page not found", "user not found", "عذراً", "هذا الحساب غير موجود", "does not exist", "not found", "404"]
             if any(kw in text_content for kw in not_found_keywords):
                 return None
@@ -152,7 +179,6 @@ def check_general_platform(name, url_template, username):
             title = soup.find('title')
             title_text = title.text.lower() if title else ""
             
-            # التأكد أن اليوزر أو جزء منه يظهر في العنوان أو أن الصفحة ليست صفحة خطأ عامة
             if "not found" in title_text or "error" in title_text or "404" in title_text:
                 return None
                 
@@ -178,7 +204,7 @@ def send_welcome(message):
     
     welcome_text = (
         "👋 **مرحباً بك في أداة البصمة الرقمية (OSINT Strict Pro)!**\n\n"
-        "🔍 **أرسل اليوزر مباشرة**، ولن يعرض البوت أي حساب إلا إذا كان حقيقياً وشغالاً بنسبة 100%."
+        "🔍 **أرسل اليوزر مباشرة**، وسيتم فحص سناب شات وبقية المنصات بدقة للتأكد من وجود الحسابات."
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -186,10 +212,10 @@ def send_welcome(message):
 def callback_query(call):
     if call.data == "help_info":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nاكتب اسم المستخدم بدون @، والنتيجة ستكون خالية من أي حسابات وهمية.", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "💡 **كيف تستخدم البوت؟**\nاكتب اسم المستخدم بدون @، والنتيجة ستعرض الحسابات الحقيقية فقط.", parse_mode="Markdown")
     elif call.data == "bot_status":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بنظام الفحص الصارم ومنع النتائج الوهمية 24/7.**", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "🟢 **البوت يعمل بنظام الفحص الدقيق 24/7.**", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def search_username(message):
@@ -202,6 +228,7 @@ def search_username(message):
     found_any = False
     
     functions_to_run = [
+        lambda: check_snapchat_strict(username),
         lambda: check_github_deep(username),
         lambda: check_tiktok_deep(username),
         lambda: check_reddit_deep(username),
