@@ -1,278 +1,401 @@
-import json
-import requests
-import urllib.parse
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from __future__ import annotations
 
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from flask import Flask, request
+import asyncio
+import html
+import logging
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Awaitable, Callable
+from urllib.parse import quote
+
+import httpx
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from bs4 import BeautifulSoup
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 
-# =========================================================
-# CONFIG
-# =========================================================
+# ============================================================
+# LOGGING
+# ============================================================
 
-# ضع توكن جديد هنا
-TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 
-RENDER_URL = "https://osint-bot-t0vn.onrender.com"
-
-# مسار webhook مستقل عن التوكن
-WEBHOOK_PATH = "/telegram-webhook"
-WEBHOOK_URL = f"{RENDER_URL.rstrip('/')}{WEBHOOK_PATH}"
-
-bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
-
-USER_CACHE = {}
+logger = logging.getLogger("username-checker")
 
 
-# =========================================================
-# HTTP
-# =========================================================
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 "
-        "(Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/131.0 Safari/537.36"
+class Settings(BaseSettings):
+    bot_token: str = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
+    request_timeout: float = 12.0
+    max_concurrency: int = 8
+    cache_ttl: int = 300
+    max_username_length: int = 100
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
-}
 
 
-def http_get(url, headers=None, params=None, timeout=10):
+settings = Settings()
 
-    try:
-        final_headers = DEFAULT_HEADERS.copy()
-
-        if headers:
-            final_headers.update(headers)
-
-        return requests.get(
-            url,
-            headers=final_headers,
-            params=params,
-            timeout=timeout,
-            allow_redirects=True
-        )
-
-    except requests.RequestException:
-        return None
+if not settings.bot_token:
+    raise RuntimeError(
+        "BOT_TOKEN is missing. Add BOT_TOKEN to the environment."
+    )
 
 
-# =========================================================
-# HELPERS
-# =========================================================
+# ============================================================
+# RESULT MODEL
+# ============================================================
 
-def normalize_username(text):
-
-    username = text.strip()
-
-    if username.startswith("@"):
-        username = username[1:]
-
-    return username.strip()
+class Status(str, Enum):
+    CONFIRMED = "confirmed"
+    NOT_FOUND = "not_found"
+    UNKNOWN = "unknown"
+    RATE_LIMITED = "rate_limited"
+    ERROR = "error"
 
 
-def encode_username(username):
-    return urllib.parse.quote(username, safe="")
+@dataclass(slots=True)
+class Evidence:
+    kind: str
+    description: str
+    strength: int
 
 
-def value(data, default="غير متوفر"):
+@dataclass(slots=True)
+class CheckResult:
+    platform: str
+    username: str
+    status: Status
+    profile_url: str
+    confidence: int = 0
+    evidence: list[Evidence] = field(default_factory=list)
+    data: dict[str, Any] = field(default_factory=dict)
+    reason: str | None = None
+    checked_at: float = field(default_factory=time.time)
 
-    if data is None:
-        return default
-
-    text = str(data).strip()
-
-    if not text:
-        return default
-
-    return text
-
-
-def format_number(number):
-
-    if number is None:
-        return "غير متوفر"
-
-    try:
-        return f"{int(number):,}"
-    except Exception:
-        return str(number)
-
-
-def format_date(date_string):
-
-    if not date_string:
-        return "غير متوفر"
-
-    try:
-
-        dt = datetime.fromisoformat(
-            str(date_string).replace("Z", "+00:00")
-        )
-
-        return dt.strftime("%Y-%m-%d %H:%M UTC")
-
-    except Exception:
-        return str(date_string)
+    @property
+    def icon(self) -> str:
+        return {
+            Status.CONFIRMED: "🟢",
+            Status.NOT_FOUND: "🔴",
+            Status.UNKNOWN: "🟠",
+            Status.RATE_LIMITED: "🟡",
+            Status.ERROR: "⚫",
+        }[self.status]
 
 
-def format_timestamp(timestamp):
+# ============================================================
+# CACHE
+# ============================================================
 
-    if not timestamp:
-        return "غير متوفر"
-
-    try:
-
-        dt = datetime.fromtimestamp(
-            float(timestamp)
-        )
-
-        return dt.strftime("%Y-%m-%d %H:%M")
-
-    except Exception:
-        return "غير متوفر"
+@dataclass(slots=True)
+class CacheEntry:
+    expires_at: float
+    results: list[CheckResult]
 
 
-def profile_strength(username):
+class ResultCache:
+    def __init__(self, ttl: int) -> None:
+        self.ttl = ttl
+        self._data: dict[str, CacheEntry] = {}
+        self._lock = asyncio.Lock()
 
-    length = len(username)
+    async def get(
+        self,
+        username: str,
+    ) -> list[CheckResult] | None:
 
-    if length >= 12:
-        return "قوي"
+        async with self._lock:
+            entry = self._data.get(username)
 
-    if length >= 7:
-        return "متوسط"
+            if not entry:
+                return None
 
-    return "قصير"
+            if entry.expires_at <= time.time():
+                self._data.pop(username, None)
+                return None
 
+            return entry.results
 
-def send_long_message(chat_id, text):
+    async def set(
+        self,
+        username: str,
+        results: list[CheckResult],
+    ) -> None:
 
-    limit = 3900
-
-    while text:
-
-        if len(text) <= limit:
-
-            bot.send_message(
-                chat_id,
-                text
+        async with self._lock:
+            self._data[username] = CacheEntry(
+                expires_at=time.time() + self.ttl,
+                results=results,
             )
 
-            break
 
-        cut = text.rfind(
-            "\n",
-            0,
-            limit
+cache = ResultCache(settings.cache_ttl)
+
+
+# ============================================================
+# HTTP CLIENT
+# ============================================================
+
+class HTTPClient:
+    RETRYABLE_STATUS_CODES = {
+        408,
+        425,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }
+
+    def __init__(self) -> None:
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                settings.request_timeout,
+                connect=8.0,
+            ),
+            follow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "PublicUsernameChecker/2.0 "
+                    "(public-profile-verification)"
+                ),
+                "Accept": "*/*",
+            },
+            limits=httpx.Limits(
+                max_connections=30,
+                max_keepalive_connections=15,
+            ),
         )
 
-        if cut < 500:
-            cut = limit
+    async def close(self) -> None:
+        await self.client.aclose()
 
-        part = text[:cut]
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> httpx.Response | None:
 
-        bot.send_message(
-            chat_id,
-            part
-        )
+        async def request() -> httpx.Response:
+            response = await self.client.get(
+                url,
+                headers=headers,
+                params=params,
+            )
 
-        text = text[cut:].lstrip()
+            if response.status_code in self.RETRYABLE_STATUS_CODES:
+                raise RetryableHTTPError(
+                    response.status_code
+                )
+
+            return response
+
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(
+                    multiplier=0.7,
+                    min=0.5,
+                    max=5,
+                ),
+                retry=retry_if_exception_type(
+                    (
+                        httpx.TimeoutException,
+                        httpx.NetworkError,
+                        RetryableHTTPError,
+                    )
+                ),
+                reraise=True,
+            ):
+                with attempt:
+                    return await request()
+
+        except RetryableHTTPError as exc:
+            logger.warning(
+                "Retryable HTTP failure: %s %s",
+                url,
+                exc.status_code,
+            )
+            return None
+
+        except (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+        ) as exc:
+            logger.warning(
+                "Network failure: %s: %s",
+                url,
+                exc,
+            )
+            return None
+
+        except Exception:
+            logger.exception(
+                "Unexpected HTTP failure: %s",
+                url,
+            )
+            return None
 
 
-# =========================================================
-# HTML METADATA
-# =========================================================
+class RetryableHTTPError(Exception):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"HTTP {status_code}")
 
-def get_meta(
-    soup,
-    property_name=None,
-    name=None
-):
+
+http = HTTPClient()
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+USERNAME_RE = re.compile(
+    r"^[A-Za-z0-9._-]{1,100}$"
+)
+
+
+def normalize_username(value: str) -> str:
+    value = value.strip()
+
+    if value.startswith("@"):
+        value = value[1:]
+
+    return value.strip()
+
+
+def valid_username(username: str) -> bool:
+    return bool(USERNAME_RE.fullmatch(username))
+
+
+def encoded(username: str) -> str:
+    return quote(username, safe="")
+
+
+def esc(value: Any) -> str:
+    if value is None:
+        return "غير متوفر"
+
+    text = str(value).strip()
+
+    if not text:
+        return "غير متوفر"
+
+    return html.escape(text)
+
+
+def number(value: Any) -> str:
+    if value is None:
+        return "غير متوفر"
+
+    try:
+        return f"{int(value):,}"
+    except (ValueError, TypeError):
+        return esc(value)
+
+
+def meta(
+    soup: BeautifulSoup,
+    *,
+    property_name: str | None = None,
+    name: str | None = None,
+) -> str | None:
+
+    attrs: dict[str, str] = {}
 
     if property_name:
-
-        tag = soup.find(
-            "meta",
-            attrs={
-                "property": property_name
-            }
-        )
-
-        if tag and tag.get("content"):
-            return tag.get("content").strip()
+        attrs["property"] = property_name
 
     if name:
+        attrs["name"] = name
 
-        tag = soup.find(
-            "meta",
-            attrs={
-                "name": name
-            }
-        )
+    tag = soup.find("meta", attrs=attrs)
 
-        if tag and tag.get("content"):
-            return tag.get("content").strip()
+    if tag:
+        content = tag.get("content")
+
+        if content:
+            return content.strip()
 
     return None
 
 
-def get_page_metadata(soup):
+def metadata(response: httpx.Response) -> dict[str, str | None]:
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser",
+    )
 
     title = None
 
-    if soup.title and soup.title.string:
-        title = soup.title.string.strip()
+    if soup.title:
+        title = soup.title.get_text(
+            " ",
+            strip=True,
+        )
 
     return {
         "title": title,
-
-        "description":
-            get_meta(
+        "description": (
+            meta(
                 soup,
-                property_name="og:description"
+                property_name="og:description",
             )
-            or
-            get_meta(
+            or meta(
                 soup,
-                name="description"
-            ),
-
-        "image":
-            get_meta(
-                soup,
-                property_name="og:image"
-            ),
-
-        "url":
-            get_meta(
-                soup,
-                property_name="og:url"
-            ),
-
-        "type":
-            get_meta(
-                soup,
-                property_name="og:type"
+                name="description",
             )
+        ),
+        "image": meta(
+            soup,
+            property_name="og:image",
+        ),
+        "url": meta(
+            soup,
+            property_name="og:url",
+        ),
+        "type": meta(
+            soup,
+            property_name="og:type",
+        ),
     }
 
 
-def looks_not_found(text):
+def obvious_not_found(text: str) -> bool:
+    normalized = text.lower()
 
-    if not text:
-        return False
-
-    text = text.lower()
-
-    bad_words = [
+    patterns = (
         "page not found",
         "user not found",
         "profile not found",
@@ -281,1311 +404,1031 @@ def looks_not_found(text):
         "does not exist",
         "this page isn't available",
         "this page is not available",
-        "404 not found"
-    ]
+        "404 not found",
+    )
 
     return any(
-        word in text
-        for word in bad_words
+        pattern in normalized
+        for pattern in patterns
     )
 
 
-# =========================================================
-# GITHUB
-# =========================================================
+def confidence_from_evidence(
+    evidence: list[Evidence],
+) -> int:
 
-def check_github(username):
+    if not evidence:
+        return 0
 
-    encoded = encode_username(username)
-
-    api_url = (
-        f"https://api.github.com/users/{encoded}"
+    total = sum(
+        item.strength
+        for item in evidence
     )
 
-    headers = {
-        "Accept":
-            "application/vnd.github+json",
-
-        "X-GitHub-Api-Version":
-            "2026-03-10",
-
-        "User-Agent":
-            "PublicProfileBot/1.0"
-    }
-
-    response = http_get(
-        api_url,
-        headers=headers,
-        timeout=10
-    )
-
-    if not response:
-        return None
-
-    if response.status_code == 404:
-        return None
-
-    if response.status_code != 200:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-                "🐙 GITHUB",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-                f"👤 Username: {username}",
-                f"⚠️ HTTP: {response.status_code}",
-                f"🔗 https://github.com/{username}",
-                "",
-                "⚠️ تعذر تأكيد البيانات من API."
-            ])
-        }
-
-    try:
-        data = response.json()
-
-    except Exception:
-        return None
-
-    login = data.get("login")
-
-    if not login:
-        return None
-
-    lines = [
-
-        "🐙 GITHUB",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "",
-
-        "🟢 الحالة: مؤكد",
-        "",
-
-        f"👤 Username: {value(login)}",
-        f"📛 Name: {value(data.get('name'))}",
-        f"📝 Bio: {value(data.get('bio'))}",
-        f"🏢 Company: {value(data.get('company'))}",
-        f"🌐 Website: {value(data.get('blog'))}",
-
-        f"👥 Followers: "
-        f"{format_number(data.get('followers'))}",
-
-        f"👤 Following: "
-        f"{format_number(data.get('following'))}",
-
-        f"📦 Public repositories: "
-        f"{format_number(data.get('public_repos'))}",
-
-        f"📝 Public gists: "
-        f"{format_number(data.get('public_gists'))}",
-
-        f"🆔 ID: {value(data.get('id'))}",
-
-        f"🏷️ Type: "
-        f"{value(data.get('type'))}",
-
-        f"📅 Created: "
-        f"{format_date(data.get('created_at'))}",
-
-        f"🔄 Updated: "
-        f"{format_date(data.get('updated_at'))}",
-
-        f"🖼️ Avatar: "
-        f"{value(data.get('avatar_url'))}",
-
-        "",
-        f"🔗 Profile: "
-        f"{value(data.get('html_url'))}"
-    ]
-
-    # -----------------------------------------------------
-    # PUBLIC REPOSITORIES
-    # -----------------------------------------------------
-
-    repos_url = (
-        f"https://api.github.com/users/"
-        f"{encoded}/repos"
-    )
-
-    repos_response = http_get(
-        repos_url,
-        headers=headers,
-        params={
-            "per_page": 5,
-            "sort": "updated",
-            "direction": "desc"
-        },
-        timeout=10
-    )
-
-    if (
-        repos_response
-        and repos_response.status_code == 200
-    ):
-
-        try:
-
-            repos = repos_response.json()
-
-            if repos:
-
-                lines.extend([
-                    "",
-                    "📚 LATEST PUBLIC REPOSITORIES",
-                    "━━━━━━━━━━━━━━━━━━━━"
-                ])
-
-                for index, repo in enumerate(
-                    repos,
-                    start=1
-                ):
-
-                    repo_name = value(
-                        repo.get("name")
-                    )
-
-                    description = value(
-                        repo.get("description"),
-                        "بدون وصف"
-                    )
-
-                    language = value(
-                        repo.get("language"),
-                        "غير محددة"
-                    )
-
-                    stars = format_number(
-                        repo.get(
-                            "stargazers_count"
-                        )
-                    )
-
-                    forks = format_number(
-                        repo.get(
-                            "forks_count"
-                        )
-                    )
-
-                    repo_url = value(
-                        repo.get("html_url")
-                    )
-
-                    lines.extend([
-                        "",
-                        f"{index}. 📦 {repo_name}",
-                        f"   📝 {description}",
-                        f"   💻 Language: {language}",
-                        f"   ⭐ Stars: {stars}",
-                        f"   🍴 Forks: {forks}",
-                        f"   🔗 {repo_url}"
-                    ])
-
-        except Exception:
-            pass
-
-    return {
-        "status": "confirmed",
-        "text": "\n".join(lines)
-    }
+    return min(total, 100)
 
 
-# =========================================================
-# REDDIT
-# =========================================================
+# ============================================================
+# PROVIDER BASE
+# ============================================================
 
-def check_reddit(username):
+class Provider:
+    name: str = "Unknown"
+    key: str = "unknown"
 
-    encoded = encode_username(username)
+    async def check(
+        self,
+        username: str,
+    ) -> CheckResult:
+        raise NotImplementedError
 
-    url = (
-        f"https://www.reddit.com/"
-        f"user/{encoded}/about.json"
-    )
 
-    response = http_get(
-        url,
-        headers={
-            "User-Agent":
-                "PublicProfileBot/1.0"
-        },
-        timeout=10
-    )
+# ============================================================
+# GITHUB PROVIDER
+# ============================================================
 
-    if not response:
-        return None
+class GitHubProvider(Provider):
+    name = "GitHub"
+    key = "github"
 
-    if response.status_code == 404:
-        return None
+    async def check(
+        self,
+        username: str,
+    ) -> CheckResult:
 
-    if response.status_code != 200:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-                "🔴 REDDIT",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-                f"👤 Username: {username}",
-                f"🔗 https://www.reddit.com/user/{encoded}/",
-                "",
-                "⚠️ تعذر قراءة بيانات الحساب."
-            ])
-        }
-
-    try:
-
-        payload = response.json()
-
-        data = payload.get(
-            "data",
-            {}
+        user_url = (
+            f"https://api.github.com/users/"
+            f"{encoded(username)}"
         )
 
-    except Exception:
-        return None
-
-    if not data:
-        return None
-
-    lines = [
-
-        "🔴 REDDIT",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "",
-
-        "🟢 الحالة: مؤكد",
-        "",
-
-        f"👤 Username: "
-        f"{value(data.get('name'))}",
-
-        f"🆔 ID: "
-        f"{value(data.get('id'))}",
-
-        f"🏆 Link Karma: "
-        f"{format_number(data.get('link_karma'))}",
-
-        f"💬 Comment Karma: "
-        f"{format_number(data.get('comment_karma'))}",
-
-        f"⭐ Total Karma: "
-        f"{format_number(data.get('total_karma'))}",
-
-        f"📅 Created: "
-        f"{format_timestamp(data.get('created_utc'))}",
-
-        f"🛡️ Moderator: "
-        f"{value(data.get('is_mod'))}",
-
-        f"🔗 Profile: "
-        f"https://www.reddit.com/user/{encoded}/"
-    ]
-
-    icon = data.get("icon_img")
-
-    if icon:
-        lines.append(
-            f"🖼️ Avatar: {icon}"
+        response = await http.get(
+            user_url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2026-03-10",
+                "User-Agent": "PublicUsernameChecker/2.0",
+            },
         )
 
-    return {
-        "status": "confirmed",
-        "text": "\n".join(lines)
-    }
+        profile_url = (
+            f"https://github.com/{encoded(username)}"
+        )
 
-
-# =========================================================
-# TIKTOK
-# =========================================================
-
-def check_tiktok(username):
-
-    encoded = encode_username(username)
-
-    url = (
-        f"https://www.tiktok.com/"
-        f"@{encoded}"
-    )
-
-    response = http_get(
-        url,
-        timeout=10
-    )
-
-    if not response:
-        return None
-
-    if response.status_code == 404:
-        return None
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    metadata = get_page_metadata(soup)
-
-    # -----------------------------------------------------
-    # SIGI_STATE
-    # -----------------------------------------------------
-
-    script = soup.find(
-        "script",
-        id="SIGI_STATE"
-    )
-
-    if script and script.string:
-
-        try:
-
-            data = json.loads(
-                script.string
+        if response is None:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=profile_url,
+                reason="تعذر الوصول إلى GitHub API.",
             )
 
-            users = (
-                data
-                .get("UserModule", {})
-                .get("users", {})
+        if response.status_code == 404:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.NOT_FOUND,
+                profile_url=profile_url,
+                confidence=95,
+                evidence=[
+                    Evidence(
+                        "official_api",
+                        "GitHub API لم يجد المستخدم.",
+                        95,
+                    )
+                ],
             )
 
-            user_data = None
-
-            for _, item in users.items():
-
-                if not isinstance(
-                    item,
-                    dict
-                ):
-                    continue
-
-                if (
-                    item.get(
-                        "uniqueId",
-                        ""
-                    ).lower()
-                    == username.lower()
-                ):
-
-                    user_data = item
-                    break
-
-            if user_data:
-
-                stats_all = (
-                    data
-                    .get("UserModule", {})
-                    .get("stats", {})
-                )
-
-                stats = {}
-
-                for _, item in stats_all.items():
-
-                    if isinstance(
-                        item,
-                        dict
-                    ):
-                        stats = item
-                        break
-
-                lines = [
-
-                    "🎵 TIKTOK",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "",
-
-                    "🟢 الحالة: مؤكد",
-                    "",
-
-                    f"👤 Username: "
-                    f"{value(user_data.get('uniqueId'))}",
-
-                    f"📛 Nickname: "
-                    f"{value(user_data.get('nickname'))}",
-
-                    f"📝 Bio: "
-                    f"{value(user_data.get('signature'))}",
-
-                    f"✅ Verified: "
-                    f"{value(user_data.get('verified'))}",
-
-                    f"🔒 Private: "
-                    f"{value(user_data.get('privateAccount'))}",
-
-                    f"👥 Followers: "
-                    f"{format_number(stats.get('followerCount'))}",
-
-                    f"👤 Following: "
-                    f"{format_number(stats.get('followingCount'))}",
-
-                    f"❤️ Likes: "
-                    f"{format_number(stats.get('heartCount'))}",
-
-                    f"🎬 Videos: "
-                    f"{format_number(stats.get('videoCount'))}",
-
-                    f"🖼️ Avatar: "
-                    f"{value(user_data.get('avatarLarger'))}",
-
-                    f"🔗 Profile: {url}"
-                ]
-
-                return {
-                    "status": "confirmed",
-                    "text": "\n".join(lines)
-                }
-
-        except Exception:
-            pass
-
-    # -----------------------------------------------------
-    # Metadata fallback
-    # -----------------------------------------------------
-
-    title = value(
-        metadata["title"],
-        ""
-    )
-
-    description = value(
-        metadata["description"],
-        ""
-    )
-
-    combined = (
-        f"{title} {description}"
-    )
-
-    if looks_not_found(combined):
-        return None
-
-    if title or description:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-
-                "🎵 TIKTOK",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-
-                "🟡 الحالة: محتمل",
-                "",
-
-                f"👤 Username: @{username}",
-                f"📛 Title: {value(title)}",
-                f"📝 Description: "
-                f"{value(description)}",
-                f"🖼️ Image: "
-                f"{value(metadata['image'])}",
-
-                f"🔗 Profile: {url}",
-
-                "",
-                "ℹ️ الصفحة استجابت، "
-                "لكن البيانات التفصيلية غير متاحة."
-            ])
-        }
-
-    return None
-
-
-# =========================================================
-# INSTAGRAM
-# =========================================================
-
-def check_instagram(username):
-
-    encoded = encode_username(username)
-
-    url = (
-        f"https://www.instagram.com/"
-        f"{encoded}/"
-    )
-
-    response = http_get(
-        url,
-        timeout=10
-    )
-
-    if not response:
-        return None
-
-    if response.status_code == 404:
-        return None
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    metadata = get_page_metadata(soup)
-
-    title = value(
-        metadata["title"],
-        ""
-    )
-
-    description = value(
-        metadata["description"],
-        ""
-    )
-
-    combined = (
-        f"{title} {description}"
-    )
-
-    if looks_not_found(combined):
-        return None
-
-    if title or description:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-
-                "📸 INSTAGRAM",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-
-                "🟡 الحالة: محتمل",
-                "",
-
-                f"👤 Username: @{username}",
-                f"📛 Title: {value(title)}",
-                f"📝 Public description: "
-                f"{value(description)}",
-                f"🖼️ Image: "
-                f"{value(metadata['image'])}",
-
-                f"🔗 Profile: {url}",
-
-                "",
-                "ℹ️ Instagram قد يحجب "
-                "التفاصيل بدون وصول رسمي."
-            ])
-        }
-
-    # 200 بدون metadata
-    if response.status_code == 200:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-
-                "📸 INSTAGRAM",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-
-                "🟡 الحالة: محتمل",
-                "",
-
-                f"👤 Username: @{username}",
-                f"🔗 Profile: {url}",
-
-                "",
-                "⚠️ الصفحة استجابت، "
-                "لكن لم نستطع استخراج "
-                "بيانات عامة كافية."
-            ])
-        }
-
-    return None
-
-
-# =========================================================
-# SNAPCHAT
-# =========================================================
-
-def check_snapchat(username):
-
-    encoded = encode_username(username)
-
-    url = (
-        f"https://www.snapchat.com/"
-        f"add/{encoded}"
-    )
-
-    response = http_get(
-        url,
-        timeout=10
-    )
-
-    if not response:
-        return None
-
-    if response.status_code == 404:
-        return None
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    metadata = get_page_metadata(soup)
-
-    title = value(
-        metadata["title"],
-        ""
-    )
-
-    description = value(
-        metadata["description"],
-        ""
-    )
-
-    combined = (
-        f"{title} {description}"
-    )
-
-    if looks_not_found(combined):
-        return None
-
-    if title or description:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-
-                "👻 SNAPCHAT",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-
-                "🟡 الحالة: محتمل",
-                "",
-
-                f"👤 Username: @{username}",
-                f"📛 Title: {value(title)}",
-                f"📝 Description: "
-                f"{value(description)}",
-                f"🖼️ Image: "
-                f"{value(metadata['image'])}",
-
-                f"🔗 Profile: {url}"
-            ])
-        }
-
-    if response.status_code == 200:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-
-                "👻 SNAPCHAT",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-
-                "🟡 الحالة: محتمل",
-                "",
-
-                f"👤 Username: @{username}",
-                f"🔗 Profile: {url}",
-
-                "",
-                "⚠️ الصفحة استجابت، "
-                "لكن البيانات غير كافية."
-            ])
-        }
-
-    return None
-
-
-# =========================================================
-# GENERAL PLATFORM
-# =========================================================
-
-def check_general_platform(
-    platform_name,
-    url_template,
-    username
-):
-
-    encoded = encode_username(username)
-
-    url = url_template.format(
-        encoded
-    )
-
-    response = http_get(
-        url,
-        timeout=10
-    )
-
-    if not response:
-        return None
-
-    # 404 = غير موجود بشكل واضح
-    if response.status_code == 404:
-        return None
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    metadata = get_page_metadata(
-        soup
-    )
-
-    title = value(
-        metadata["title"],
-        ""
-    )
-
-    description = value(
-        metadata["description"],
-        ""
-    )
-
-    combined = (
-        f"{title} {description}"
-    )
-
-    if looks_not_found(combined):
-        return None
-
-    # عندنا بيانات
-    if (
-        title
-        or description
-        or metadata["image"]
-    ):
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-
-                f"🌐 {platform_name.upper()}",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-
-                "🟡 الحالة: محتمل",
-                "",
-
-                f"👤 Username: @{username}",
-                f"📛 Page title: "
-                f"{value(title)}",
-                f"📝 Description: "
-                f"{value(description)}",
-                f"🖼️ Image: "
-                f"{value(metadata['image'])}",
-
-                f"🔗 Profile: {url}",
-
-                "",
-                "ℹ️ الصفحة استجابت "
-                "وأعطت بيانات عامة."
-            ])
-        }
-
-    # 200 بدون metadata
-    if response.status_code == 200:
-
-        return {
-            "status": "possible",
-            "text": "\n".join([
-
-                f"🌐 {platform_name.upper()}",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-
-                "🟡 الحالة: محتمل",
-                "",
-
-                f"👤 Username: @{username}",
-                f"🔗 Profile: {url}",
-
-                "",
-                "⚠️ الصفحة استجابت، "
-                "لكن لا توجد metadata كافية."
-            ])
-        }
-
-    return None
-
-
-# =========================================================
-# PLATFORM LIST
-# =========================================================
-
-def get_platforms(username):
-
-    return {
-
-        "snapchat": (
-            "👻 Snapchat",
-            lambda:
-                check_snapchat(username)
-        ),
-
-        "tiktok": (
-            "🎵 TikTok",
-            lambda:
-                check_tiktok(username)
-        ),
-
-        "instagram": (
-            "📸 Instagram",
-            lambda:
-                check_instagram(username)
-        ),
-
-        "reddit": (
-            "🔴 Reddit",
-            lambda:
-                check_reddit(username)
-        ),
-
-        "github": (
-            "🐙 GitHub",
-            lambda:
-                check_github(username)
-        ),
-
-        "twitter": (
-            "𝕏 Twitter / X",
-            lambda:
-                check_general_platform(
-                    "Twitter / X",
-                    "https://twitter.com/{}",
-                    username
-                )
-        ),
-
-        "pinterest": (
-            "📌 Pinterest",
-            lambda:
-                check_general_platform(
-                    "Pinterest",
-                    "https://www.pinterest.com/{}/",
-                    username
-                )
-        ),
-
-        "twitch": (
-            "🎮 Twitch",
-            lambda:
-                check_general_platform(
-                    "Twitch",
-                    "https://www.twitch.tv/{}",
-                    username
-                )
-        )
-    }
-
-
-# =========================================================
-# START
-# =========================================================
-
-@bot.message_handler(
-    commands=["start"]
-)
-def start(message):
-
-    text = (
-        "🤖 PUBLIC PROFILE SEARCH\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        "أرسل Username للبحث.\n\n"
-
-        "مثال:\n"
-        "osvo4\n\n"
-
-        "أو:\n"
-        "@osvo4\n\n"
-
-        "🟢 مؤكد = تم الحصول على بيانات "
-        "مباشرة.\n"
-
-        "🟡 محتمل = الصفحة استجابت لكن "
-        "المنصة لم تعطِ بيانات كافية.\n"
-
-        "🔴 غير موجود = استجابة واضحة "
-        "بعدم وجود الصفحة."
-    )
-
-    bot.send_message(
-        message.chat.id,
-        text
-    )
-
-
-# =========================================================
-# SEARCH
-# =========================================================
-
-@bot.message_handler(
-    func=lambda message: True
-)
-def search_username(message):
-
-    username = normalize_username(
-        message.text
-    )
-
-    if not username:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ أرسل Username صحيح."
+        if response.status_code in {403, 429}:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.RATE_LIMITED,
+                profile_url=profile_url,
+                reason=(
+                    "GitHub رفض الطلب أو فرض حدًا "
+                    "على معدل الطلبات."
+                ),
+            )
+
+        if response.status_code != 200:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=profile_url,
+                reason=(
+                    f"GitHub API returned "
+                    f"HTTP {response.status_code}."
+                ),
+            )
+
+        try:
+            data = response.json()
+        except ValueError:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=profile_url,
+                reason="استجابة GitHub غير صالحة.",
+            )
+
+        login = data.get("login")
+
+        if not login:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=profile_url,
+                reason="لم يتم العثور على login في الاستجابة.",
+            )
+
+        evidence = [
+            Evidence(
+                "official_api",
+                "تم العثور على الحساب عبر GitHub API.",
+                70,
+            ),
+            Evidence(
+                "exact_login",
+                "اسم المستخدم مطابق للبحث.",
+                30,
+            ),
+        ]
+
+        repos: list[dict[str, Any]] = []
+
+        repos_url = (
+            f"https://api.github.com/users/"
+            f"{encoded(username)}/repos"
         )
 
-        return
-
-    if len(username) > 100:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Username طويل جدًا."
+        repos_response = await http.get(
+            repos_url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2026-03-10",
+                "User-Agent": "PublicUsernameChecker/2.0",
+            },
+            params={
+                "per_page": 5,
+                "sort": "updated",
+                "direction": "desc",
+            },
         )
 
-        return
-
-    waiting = bot.send_message(
-        message.chat.id,
-        "🔎 جاري فحص المنصات العامة...\n"
-        "⏳ انتظر قليلًا."
-    )
-
-    platforms = get_platforms(
-        username
-    )
-
-    results = {}
-
-    # -----------------------------------------------------
-    # PARALLEL CHECK
-    # -----------------------------------------------------
-
-    with ThreadPoolExecutor(
-        max_workers=6
-    ) as executor:
-
-        future_map = {
-            executor.submit(
-                function
-            ): key
-
-            for key, (_, function)
-            in platforms.items()
-        }
-
-        for future in as_completed(
-            future_map
+        if (
+            repos_response
+            and repos_response.status_code == 200
         ):
+            try:
+                repos = repos_response.json()
+            except ValueError:
+                repos = []
 
-            key = future_map[
-                future
-            ]
+        return CheckResult(
+            platform=self.name,
+            username=username,
+            status=Status.CONFIRMED,
+            profile_url=data.get(
+                "html_url",
+                profile_url,
+            ),
+            confidence=confidence_from_evidence(
+                evidence
+            ),
+            evidence=evidence,
+            data={
+                "login": login,
+                "name": data.get("name"),
+                "bio": data.get("bio"),
+                "company": data.get("company"),
+                "blog": data.get("blog"),
+                "followers": data.get("followers"),
+                "following": data.get("following"),
+                "public_repos": data.get("public_repos"),
+                "public_gists": data.get("public_gists"),
+                "id": data.get("id"),
+                "type": data.get("type"),
+                "created_at": data.get("created_at"),
+                "updated_at": data.get("updated_at"),
+                "avatar_url": data.get("avatar_url"),
+                "repos": repos,
+            },
+        )
+
+
+# ============================================================
+# REDDIT PROVIDER
+# ============================================================
+
+class RedditProvider(Provider):
+    name = "Reddit"
+    key = "reddit"
+
+    async def check(
+        self,
+        username: str,
+    ) -> CheckResult:
+
+        profile_url = (
+            f"https://www.reddit.com/user/"
+            f"{encoded(username)}/"
+        )
+
+        api_url = (
+            f"https://www.reddit.com/user/"
+            f"{encoded(username)}/about.json"
+        )
+
+        response = await http.get(
+            api_url,
+            headers={
+                "User-Agent": (
+                    "PublicUsernameChecker/2.0 "
+                    "by public-profile-checker"
+                )
+            },
+        )
+
+        if response is None:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=profile_url,
+                reason="تعذر الوصول إلى Reddit.",
+            )
+
+        if response.status_code == 404:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.NOT_FOUND,
+                profile_url=profile_url,
+                confidence=95,
+                evidence=[
+                    Evidence(
+                        "official_endpoint",
+                        "Reddit لم يعثر على الحساب.",
+                        95,
+                    )
+                ],
+            )
+
+        if response.status_code in {403, 429}:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.RATE_LIMITED,
+                profile_url=profile_url,
+                reason="Reddit قيّد الوصول إلى الطلب.",
+            )
+
+        if response.status_code != 200:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=profile_url,
+                reason=(
+                    f"Reddit returned HTTP "
+                    f"{response.status_code}."
+                ),
+            )
+
+        try:
+            payload = response.json()
+            data = payload.get("data") or {}
+        except ValueError:
+            data = {}
+
+        if not data or not data.get("name"):
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=profile_url,
+                reason="لم نستطع إثبات الحساب من الاستجابة.",
+            )
+
+        evidence = [
+            Evidence(
+                "public_endpoint",
+                "تم الحصول على بيانات الحساب من Reddit.",
+                70,
+            ),
+            Evidence(
+                "exact_username",
+                "اسم المستخدم موجود في بيانات الحساب.",
+                30,
+            ),
+        ]
+
+        return CheckResult(
+            platform=self.name,
+            username=username,
+            status=Status.CONFIRMED,
+            profile_url=profile_url,
+            confidence=confidence_from_evidence(
+                evidence
+            ),
+            evidence=evidence,
+            data={
+                "name": data.get("name"),
+                "id": data.get("id"),
+                "link_karma": data.get("link_karma"),
+                "comment_karma": data.get("comment_karma"),
+                "total_karma": data.get("total_karma"),
+                "created_utc": data.get("created_utc"),
+                "is_mod": data.get("is_mod"),
+                "icon_img": data.get("icon_img"),
+            },
+        )
+
+
+# ============================================================
+# HTML PROVIDER
+# ============================================================
+
+class HTMLProvider(Provider):
+    url_template: str = ""
+
+    async def check(
+        self,
+        username: str,
+    ) -> CheckResult:
+
+        url = self.url_template.format(
+            encoded(username)
+        )
+
+        response = await http.get(url)
+
+        if response is None:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=url,
+                reason="تعذر الوصول إلى الصفحة.",
+            )
+
+        if response.status_code == 404:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.NOT_FOUND,
+                profile_url=url,
+                confidence=90,
+                evidence=[
+                    Evidence(
+                        "http_404",
+                        "الخادم أعاد HTTP 404.",
+                        90,
+                    )
+                ],
+            )
+
+        if response.status_code in {403, 429}:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.RATE_LIMITED,
+                profile_url=url,
+                reason="المنصة قيّدت الوصول.",
+            )
+
+        if response.status_code != 200:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=url,
+                reason=(
+                    f"HTTP {response.status_code}"
+                ),
+            )
+
+        page = metadata(response)
+
+        combined = " ".join(
+            value
+            for value in page.values()
+            if value
+        )
+
+        if obvious_not_found(combined):
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.NOT_FOUND,
+                profile_url=url,
+                confidence=80,
+                evidence=[
+                    Evidence(
+                        "not_found_marker",
+                        "الصفحة تحتوي على مؤشر واضح لعدم وجود الحساب.",
+                        80,
+                    )
+                ],
+            )
+
+        # لا نعتبر مجرد HTTP 200 وجودًا للحساب.
+        if not page["title"] and not page["description"]:
+            return CheckResult(
+                platform=self.name,
+                username=username,
+                status=Status.UNKNOWN,
+                profile_url=url,
+                reason=(
+                    "الصفحة استجابت لكن لم توجد "
+                    "أدلة عامة كافية لإثبات الحساب."
+                ),
+            )
+
+        return CheckResult(
+            platform=self.name,
+            username=username,
+            status=Status.UNKNOWN,
+            profile_url=url,
+            confidence=0,
+            evidence=[],
+            data={
+                "title": page["title"],
+                "description": page["description"],
+                "image": page["image"],
+                "canonical": page["url"],
+            },
+            reason=(
+                "وجدت استجابة وmetadata، "
+                "لكنها غير كافية لإثبات ملكية/وجود الحساب."
+            ),
+        )
+
+
+# ============================================================
+# PLATFORM PROVIDERS
+# ============================================================
+
+class InstagramProvider(HTMLProvider):
+    name = "Instagram"
+    key = "instagram"
+    url_template = "https://www.instagram.com/{}/"
+
+
+class TikTokProvider(HTMLProvider):
+    name = "TikTok"
+    key = "tiktok"
+    url_template = "https://www.tiktok.com/@{}"
+
+
+class SnapchatProvider(HTMLProvider):
+    name = "Snapchat"
+    key = "snapchat"
+    url_template = "https://www.snapchat.com/add/{}"
+
+
+class XProvider(HTMLProvider):
+    name = "Twitter / X"
+    key = "twitter"
+    url_template = "https://x.com/{}"
+
+
+class PinterestProvider(HTMLProvider):
+    name = "Pinterest"
+    key = "pinterest"
+    url_template = "https://www.pinterest.com/{}/"
+
+
+class TwitchProvider(HTMLProvider):
+    name = "Twitch"
+    key = "twitch"
+    url_template = "https://www.twitch.tv/{}"
+
+
+# ============================================================
+# PROVIDER REGISTRY
+# ============================================================
+
+PROVIDERS: list[Provider] = [
+    GitHubProvider(),
+    RedditProvider(),
+    InstagramProvider(),
+    TikTokProvider(),
+    SnapchatProvider(),
+    XProvider(),
+    PinterestProvider(),
+    TwitchProvider(),
+]
+
+
+# ============================================================
+# CHECK ENGINE
+# ============================================================
+
+class CheckEngine:
+    def __init__(
+        self,
+        providers: list[Provider],
+        concurrency: int,
+    ) -> None:
+
+        self.providers = providers
+        self.semaphore = asyncio.Semaphore(
+            concurrency
+        )
+
+    async def _run_provider(
+        self,
+        provider: Provider,
+        username: str,
+    ) -> CheckResult:
+
+        async with self.semaphore:
 
             try:
+                return await provider.check(
+                    username
+                )
 
-                result = future.result()
+            except asyncio.CancelledError:
+                raise
 
-                if result:
-                    results[key] = result
+            except Exception as exc:
+                logger.exception(
+                    "Provider failed: %s",
+                    provider.name,
+                )
 
-            except Exception:
-                pass
+                return CheckResult(
+                    platform=provider.name,
+                    username=username,
+                    status=Status.ERROR,
+                    profile_url="",
+                    reason=(
+                        "حدث خطأ داخلي أثناء الفحص."
+                    ),
+                )
 
-    # -----------------------------------------------------
-    # CACHE
-    # -----------------------------------------------------
+    async def check(
+        self,
+        username: str,
+    ) -> list[CheckResult]:
 
-    USER_CACHE[
-        message.chat.id
-    ] = {
+        cached = await cache.get(username)
 
-        "username": username,
-
-        "results": results
-    }
-
-    # -----------------------------------------------------
-    # DELETE WAITING MESSAGE
-    # -----------------------------------------------------
-
-    try:
-
-        bot.delete_message(
-            message.chat.id,
-            waiting.message_id
-        )
-
-    except Exception:
-        pass
-
-    # -----------------------------------------------------
-    # COUNTS
-    # -----------------------------------------------------
-
-    confirmed = 0
-    possible = 0
-
-    for result in results.values():
-
-        if result["status"] == "confirmed":
-            confirmed += 1
-
-        elif result["status"] == "possible":
-            possible += 1
-
-    not_found = (
-        len(platforms)
-        - len(results)
-    )
-
-    # -----------------------------------------------------
-    # SUMMARY
-    # -----------------------------------------------------
-
-    lines = [
-
-        "🔎 PUBLIC ACCOUNT SEARCH",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "",
-
-        f"👤 Username: {username}",
-
-        f"📏 Length: "
-        f"{len(username)}",
-
-        f"💪 Username strength: "
-        f"{profile_strength(username)}",
-
-        "",
-
-        "📊 RESULTS",
-        "━━━━━━━━━━━━━━━━━━━━",
-
-        f"🟢 Confirmed: {confirmed}",
-        f"🟡 Possible: {possible}",
-        f"🔴 Not found: {not_found}",
-
-        ""
-    ]
-
-    # -----------------------------------------------------
-    # PLATFORM STATUS
-    # -----------------------------------------------------
-
-    for key, (
-        display_name,
-        _
-    ) in platforms.items():
-
-        if key not in results:
-
-            lines.append(
-                f"🔴 {display_name}"
+        if cached is not None:
+            logger.info(
+                "Cache hit: %s",
+                username,
             )
+            return cached
 
-            continue
-
-        status = results[
-            key
-        ]["status"]
-
-        if status == "confirmed":
-
-            lines.append(
-                f"🟢 {display_name}"
-            )
-
-        else:
-
-            lines.append(
-                f"🟡 {display_name}"
-            )
-
-    # -----------------------------------------------------
-    # BUTTONS
-    # -----------------------------------------------------
-
-    keyboard = InlineKeyboardMarkup(
-        row_width=2
-    )
-
-    for key, (
-        display_name,
-        _
-    ) in platforms.items():
-
-        if key in results:
-
-            keyboard.add(
-                InlineKeyboardButton(
-                    display_name,
-                    callback_data=(
-                        f"show_{key}"
-                    )
+        tasks = [
+            asyncio.create_task(
+                self._run_provider(
+                    provider,
+                    username,
                 )
             )
+            for provider in self.providers
+        ]
+
+        results = await asyncio.gather(
+            *tasks
+        )
+
+        await cache.set(
+            username,
+            results,
+        )
+
+        return results
+
+
+engine = CheckEngine(
+    PROVIDERS,
+    settings.max_concurrency,
+)
+
+
+# ============================================================
+# TELEGRAM FORMATTER
+# ============================================================
+
+def status_label(result: CheckResult) -> str:
+    labels = {
+        Status.CONFIRMED: "مؤكد",
+        Status.NOT_FOUND: "غير موجود",
+        Status.UNKNOWN: "غير مؤكد",
+        Status.RATE_LIMITED: "مقيّد مؤقتًا",
+        Status.ERROR: "خطأ",
+    }
+
+    return labels[result.status]
+
+
+def summary_text(
+    username: str,
+    results: list[CheckResult],
+) -> str:
+
+    counts = {
+        Status.CONFIRMED: 0,
+        Status.NOT_FOUND: 0,
+        Status.UNKNOWN: 0,
+        Status.RATE_LIMITED: 0,
+        Status.ERROR: 0,
+    }
+
+    for result in results:
+        counts[result.status] += 1
+
+    lines = [
+        "🔎 <b>PUBLIC USERNAME SEARCH</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"👤 Username: <code>{esc(username)}</code>",
+        f"📏 Length: {len(username)}",
+        "",
+        "📊 <b>RESULTS</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🟢 Confirmed: {counts[Status.CONFIRMED]}",
+        f"🔴 Not found: {counts[Status.NOT_FOUND]}",
+        f"🟠 Unknown: {counts[Status.UNKNOWN]}",
+        f"🟡 Rate limited: {counts[Status.RATE_LIMITED]}",
+        f"⚫ Error: {counts[Status.ERROR]}",
+        "",
+    ]
+
+    for result in results:
+        lines.append(
+            f"{result.icon} "
+            f"<b>{esc(result.platform)}</b> — "
+            f"{status_label(result)}"
+        )
 
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━━━",
-        "👇 اضغط على المنصة "
-        "لعرض التقرير الكامل."
+        "اضغط على المنصة لعرض الأدلة والتفاصيل.",
     ])
 
-    bot.send_message(
-        message.chat.id,
-        "\n".join(lines),
-        reply_markup=(
-            keyboard
-            if results
-            else None
-        )
-    )
+    return "\n".join(lines)
 
 
-# =========================================================
-# CALLBACK
-# =========================================================
+def detail_text(
+    result: CheckResult,
+) -> str:
 
-@bot.callback_query_handler(
-    func=lambda call:
-        call.data.startswith("show_")
-)
-def handle_platform_callback(call):
+    lines = [
+        f"{result.icon} <b>{esc(result.platform)}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"👤 Username: <code>{esc(result.username)}</code>",
+        f"📊 Status: <b>{status_label(result)}</b>",
+        f"🎯 Confidence: {result.confidence}%",
+        f"🔗 Profile: {esc(result.profile_url)}",
+        "",
+    ]
 
-    chat_id = (
-        call.message.chat.id
-    )
-
-    platform_key = (
-        call.data
-        .replace(
-            "show_",
+    if result.reason:
+        lines.extend([
+            "ℹ️ <b>Reason</b>",
+            esc(result.reason),
             "",
-            1
+        ])
+
+    if result.evidence:
+        lines.extend([
+            "🧾 <b>Evidence</b>",
+            "",
+        ])
+
+        for item in result.evidence:
+            lines.append(
+                f"✓ {esc(item.description)} "
+                f"({item.strength}%)"
+            )
+
+        lines.append("")
+
+    data = result.data
+
+    if data:
+        lines.extend([
+            "📋 <b>Public Data</b>",
+            "",
+        ])
+
+        fields = (
+            ("login", "👤 Login"),
+            ("name", "📛 Name"),
+            ("bio", "📝 Bio"),
+            ("company", "🏢 Company"),
+            ("blog", "🌐 Website"),
+            ("followers", "👥 Followers"),
+            ("following", "👤 Following"),
+            ("public_repos", "📦 Public repositories"),
+            ("public_gists", "📝 Public gists"),
+            ("id", "🆔 ID"),
+            ("type", "🏷️ Type"),
+            ("link_karma", "🏆 Link Karma"),
+            ("comment_karma", "💬 Comment Karma"),
+            ("total_karma", "⭐ Total Karma"),
+            ("created_utc", "📅 Created"),
         )
+
+        for key, label in fields:
+            if key not in data:
+                continue
+
+            current = data[key]
+
+            if current is None or current == "":
+                continue
+
+            if isinstance(
+                current,
+                (dict, list),
+            ):
+                continue
+
+            if key.endswith("karma") or key in {
+                "followers",
+                "following",
+                "public_repos",
+                "public_gists",
+            }:
+                current = number(current)
+
+            lines.append(
+                f"{label}: {esc(current)}"
+            )
+
+        repos = data.get("repos")
+
+        if isinstance(repos, list) and repos:
+            lines.extend([
+                "",
+                "📚 <b>Latest Public Repositories</b>",
+            ])
+
+            for index, repo in enumerate(
+                repos[:5],
+                start=1,
+            ):
+                if not isinstance(repo, dict):
+                    continue
+
+                name = esc(
+                    repo.get(
+                        "name",
+                        "غير متوفر",
+                    )
+                )
+
+                url = esc(
+                    repo.get(
+                        "html_url",
+                        "",
+                    )
+                )
+
+                lines.append(
+                    f"{index}. 📦 "
+                    f"<a href=\"{url}\">{name}</a>"
+                )
+
+    return "\n".join(lines)
+
+
+def keyboard(
+    results: list[CheckResult],
+) -> InlineKeyboardMarkup:
+
+    buttons: list[
+        list[InlineKeyboardButton]
+    ] = []
+
+    for result in results:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"{result.icon} "
+                    f"{result.platform}"
+                ),
+                callback_data=(
+                    f"result:{result.platform}"
+                ),
+            )
+        ])
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=buttons
     )
 
-    user_data = USER_CACHE.get(
-        chat_id
-    )
 
-    if not user_data:
+# ============================================================
+# TELEGRAM STATE
+# ============================================================
 
-        bot.answer_callback_query(
-            call.id,
-            "❌ انتهت نتيجة البحث."
-        )
-
-        return
-
-    results = user_data.get(
-        "results",
-        {}
-    )
-
-    result = results.get(
-        platform_key
-    )
-
-    if not result:
-
-        bot.answer_callback_query(
-            call.id,
-            "❌ لا توجد نتيجة."
-        )
-
-        return
-
-    bot.answer_callback_query(
-        call.id,
-        "📊 جاري عرض التقرير..."
-    )
-
-    send_long_message(
-        chat_id,
-        result["text"]
-    )
+USER_RESULTS: dict[
+    int,
+    dict[str, CheckResult],
+] = {}
 
 
-# =========================================================
-# FLASK
-# =========================================================
+# ============================================================
+# BOT
+# ============================================================
 
-@app.route("/")
-def home():
-
-    return (
-        "🤖 Public Profile Bot is active!"
-    )
-
-
-@app.route(
-    WEBHOOK_PATH,
-    methods=["POST"]
+bot = Bot(
+    token=settings.bot_token,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML,
+    ),
 )
-def webhook():
 
-    content_type = request.headers.get(
-        "content-type",
-        ""
+dp = Dispatcher()
+
+
+# ============================================================
+# /START
+# ============================================================
+
+@dp.message(CommandStart())
+async def start_handler(
+    message: Message,
+) -> None:
+
+    await message.answer(
+        "🤖 <b>PUBLIC USERNAME CHECKER</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "أرسل Username لفحص المنصات العامة.\n\n"
+        "مثال:\n"
+        "<code>osvo4</code>\n\n"
+        "أو:\n"
+        "<code>@osvo4</code>\n\n"
+        "🟢 مؤكد = توجد أدلة مباشرة.\n"
+        "🔴 غير موجود = توجد إشارة قوية لعدم وجود الحساب.\n"
+        "🟠 غير مؤكد = لم تتوفر أدلة كافية.\n"
+        "🟡 مقيّد = المنصة حدّت الوصول مؤقتًا."
     )
 
-    if content_type.startswith(
-        "application/json"
-    ):
 
-        json_string = (
-            request
-            .get_data()
-            .decode("utf-8")
+# ============================================================
+# SEARCH
+# ============================================================
+
+@dp.message(F.text)
+async def search_handler(
+    message: Message,
+) -> None:
+
+    raw = message.text or ""
+    username = normalize_username(raw)
+
+    if not username:
+        await message.answer(
+            "❌ أرسل Username."
         )
+        return
 
-        update = (
-            telebot.types.Update
-            .de_json(json_string)
+    if len(username) > settings.max_username_length:
+        await message.answer(
+            "❌ Username طويل جدًا."
         )
+        return
 
-        bot.process_new_updates(
-            [update]
+    if not valid_username(username):
+        await message.answer(
+            "❌ Username يحتوي على رموز غير مدعومة."
         )
+        return
 
-        return "", 200
-
-    return "", 403
-
-
-# =========================================================
-# RUN
-# =========================================================
-
-if __name__ == "__main__":
-
-    print(
-        "🚀 Starting Public Profile Bot..."
+    waiting = await message.answer(
+        "🔎 <b>جاري الفحص...</b>\n"
+        "قد يستغرق الأمر عدة ثوانٍ."
     )
+
+    results = await engine.check(
+        username
+    )
+
+    USER_RESULTS[message.chat.id] = {
+        result.platform: result
+        for result in results
+    }
 
     try:
-        bot.remove_webhook()
+        await waiting.delete()
     except Exception:
         pass
 
-    bot.set_webhook(
-        url=WEBHOOK_URL
+    await message.answer(
+        summary_text(
+            username,
+            results,
+        ),
+        reply_markup=keyboard(results),
     )
 
-    print(
-        f"✅ Webhook set: {WEBHOOK_URL}"
+
+# ============================================================
+# CALLBACK
+# ============================================================
+
+@dp.callback_query(
+    F.data.startswith("result:")
+)
+async def result_callback(
+    callback: CallbackQuery,
+) -> None:
+
+    if not callback.message:
+        await callback.answer()
+        return
+
+    platform = (
+        callback.data
+        .split(":", 1)[1]
     )
 
-    port = int(
-        __import__("os")
-        .environ
-        .get(
-            "PORT",
-            10000
+    user_results = USER_RESULTS.get(
+        callback.message.chat.id,
+        {},
+    )
+
+    result = user_results.get(
+        platform
+    )
+
+    if not result:
+        await callback.answer(
+            "❌ انتهت نتيجة البحث.",
+            show_alert=True,
         )
+        return
+
+    await callback.answer()
+
+    text = detail_text(result)
+
+    # Telegram message limit safety.
+    if len(text) <= 3900:
+        await callback.message.answer(
+            text
+        )
+        return
+
+    for start in range(
+        0,
+        len(text),
+        3900,
+    ):
+        await callback.message.answer(
+            text[start:start + 3900]
+        )
+
+
+# ============================================================
+# SHUTDOWN
+# ============================================================
+
+async def shutdown() -> None:
+    logger.info(
+        "Shutting down..."
     )
 
-    app.run(
-        host="0.0.0.0",
-        port=port
+    await http.close()
+    await bot.session.close()
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main() -> None:
+
+    logger.info(
+        "Starting Public Username Checker..."
     )
+
+    try:
+        await dp.start_polling(
+            bot
+        )
+
+    finally:
+        await shutdown()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
