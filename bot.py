@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from aiohttp import web
@@ -19,6 +20,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -58,6 +60,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ضع التوكن هنا إذا كنت مصممًا على وضعه داخل الكود.
+    # لا ترفع الملف إلى GitHub وهو يحتوي على توكن حقيقي.
     bot_token: str = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 
     render_url: str = Field(
@@ -75,6 +79,11 @@ class Settings(BaseSettings):
         alias="REQUEST_TIMEOUT",
     )
 
+    media_timeout: float = Field(
+        default=45.0,
+        alias="MEDIA_TIMEOUT",
+    )
+
     max_concurrency: int = Field(
         default=8,
         alias="MAX_CONCURRENCY",
@@ -83,6 +92,21 @@ class Settings(BaseSettings):
     cache_ttl: int = Field(
         default=300,
         alias="CACHE_TTL",
+    )
+
+    media_cache_ttl: int = Field(
+        default=120,
+        alias="MEDIA_CACHE_TTL",
+    )
+
+    max_media_size_mb: int = Field(
+        default=45,
+        alias="MAX_MEDIA_SIZE_MB",
+    )
+
+    max_media_items: int = Field(
+        default=20,
+        alias="MAX_MEDIA_ITEMS",
     )
 
     max_username_length: int = Field(
@@ -103,7 +127,20 @@ class Status(str, Enum):
     NOT_FOUND = "NOT_FOUND"
     UNKNOWN = "UNKNOWN"
     RATE_LIMITED = "RATE_LIMITED"
+    PRIVATE = "PRIVATE"
+    UNAVAILABLE = "UNAVAILABLE"
     ERROR = "ERROR"
+
+
+# ============================================================
+# MEDIA TYPES
+# ============================================================
+
+class MediaType(str, Enum):
+    VIDEO = "VIDEO"
+    IMAGE = "IMAGE"
+    STORY = "STORY"
+    UNKNOWN = "UNKNOWN"
 
 
 # ============================================================
@@ -143,6 +180,50 @@ class CheckResult:
     )
 
 
+@dataclass
+class PublicProfile:
+    platform: str
+    username: str
+
+    display_name: str | None = None
+    bio: str | None = None
+
+    avatar_url: str | None = None
+
+    followers: int | None = None
+    following: int | None = None
+    likes: int | None = None
+    videos: int | None = None
+
+    verified: bool | None = None
+
+    website: str | None = None
+
+    profile_url: str | None = None
+
+    raw_source: str | None = None
+
+
+@dataclass
+class PublicMedia:
+    platform: str
+    username: str
+
+    media_type: MediaType
+
+    url: str
+
+    thumbnail_url: str | None = None
+
+    title: str | None = None
+
+    published_at: str | None = None
+
+    source_url: str | None = None
+
+    downloadable: bool = False
+
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -152,7 +233,10 @@ USERNAME_RE = re.compile(
 )
 
 
-def normalize_username(username: str) -> str:
+def normalize_username(
+    username: str,
+) -> str:
+
     username = username.strip()
 
     if username.startswith("@"):
@@ -161,40 +245,67 @@ def normalize_username(username: str) -> str:
     return username.strip()
 
 
-def valid_username(username: str) -> bool:
+def valid_username(
+    username: str,
+) -> bool:
+
     return bool(
         USERNAME_RE.fullmatch(username)
     )
 
 
-def esc(value: Any) -> str:
-    return html.escape(str(value))
+def esc(
+    value: Any,
+) -> str:
+
+    return html.escape(
+        str(value)
+    )
 
 
-def status_icon(status: Status) -> str:
+def status_icon(
+    status: Status,
+) -> str:
+
     return {
         Status.CONFIRMED: "🟢",
         Status.NOT_FOUND: "🔴",
         Status.UNKNOWN: "🟠",
         Status.RATE_LIMITED: "🟡",
+        Status.PRIVATE: "🔒",
+        Status.UNAVAILABLE: "⚪",
         Status.ERROR: "⚫",
-    }.get(status, "⚪")
+    }.get(
+        status,
+        "⚪",
+    )
 
 
-def status_name(status: Status) -> str:
+def status_name(
+    status: Status,
+) -> str:
+
     return {
         Status.CONFIRMED: "CONFIRMED",
         Status.NOT_FOUND: "NOT FOUND",
         Status.UNKNOWN: "UNKNOWN",
         Status.RATE_LIMITED: "RATE LIMITED",
+        Status.PRIVATE: "PRIVATE",
+        Status.UNAVAILABLE: "UNAVAILABLE",
         Status.ERROR: "ERROR",
-    }.get(status, "UNKNOWN")
+    }.get(
+        status,
+        "UNKNOWN",
+    )
 
 
-def confidence_bar(value: int) -> str:
+def confidence_bar(
+    value: int,
+) -> str:
+
     value = max(
         0,
-        min(100, value)
+        min(100, value),
     )
 
     filled = round(
@@ -214,9 +325,12 @@ def safe_profile_url(
     if not url:
         return None
 
-    if not url.startswith(
-        ("https://", "http://")
-    ):
+    parsed = urlparse(url)
+
+    if parsed.scheme not in {
+        "https",
+        "http",
+    }:
         return None
 
     return url
@@ -227,7 +341,9 @@ def make_link(
     url: str | None,
 ) -> str:
 
-    url = safe_profile_url(url)
+    url = safe_profile_url(
+        url
+    )
 
     if not url:
         return esc(text)
@@ -239,6 +355,30 @@ def make_link(
     )
 
 
+def compact_number(
+    value: Any,
+) -> str:
+
+    if value is None:
+        return "—"
+
+    try:
+        number = int(value)
+    except Exception:
+        return esc(value)
+
+    if number >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.1f}B"
+
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M"
+
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}K"
+
+    return str(number)
+
+
 # ============================================================
 # CACHE
 # ============================================================
@@ -246,10 +386,10 @@ def make_link(
 @dataclass
 class CacheEntry:
     created_at: float
-    result: CheckResult
+    value: Any
 
 
-class ResultCache:
+class TTLCache:
 
     def __init__(
         self,
@@ -259,7 +399,7 @@ class ResultCache:
 
         self._cache: dict[
             str,
-            CacheEntry
+            CacheEntry,
         ] = {}
 
         self._lock = asyncio.Lock()
@@ -267,7 +407,7 @@ class ResultCache:
     async def get(
         self,
         key: str,
-    ) -> CheckResult | None:
+    ) -> Any | None:
 
         async with self._lock:
 
@@ -292,19 +432,19 @@ class ResultCache:
 
                 return None
 
-            return entry.result
+            return entry.value
 
     async def set(
         self,
         key: str,
-        result: CheckResult,
+        value: Any,
     ) -> None:
 
         async with self._lock:
 
             self._cache[key] = CacheEntry(
                 created_at=time.monotonic(),
-                result=result,
+                value=value,
             )
 
     async def delete(
@@ -313,14 +453,24 @@ class ResultCache:
     ) -> None:
 
         async with self._lock:
+
             self._cache.pop(
                 key,
                 None,
             )
 
 
+result_cache = TTLCache(
+    settings.cache_ttl
+)
+
+media_cache = TTLCache(
+    settings.media_cache_ttl
+)
+
+
 # ============================================================
-# HTTP CLIENT
+# HTTP
 # ============================================================
 
 class RetryableHTTPError(
@@ -345,7 +495,7 @@ class HTTPClient:
                 "User-Agent": (
                     "Mozilla/5.0 "
                     "(compatible; "
-                    "UsernameChecker/1.0)"
+                    "UsernameChecker/2.0)"
                 ),
                 "Accept": "*/*",
             },
@@ -386,8 +536,7 @@ class HTTPClient:
                 }:
 
                     raise RetryableHTTPError(
-                        f"HTTP "
-                        f"{response.status_code}"
+                        f"HTTP {response.status_code}"
                     )
 
                 return response
@@ -430,6 +579,139 @@ class HTTPClient:
 
             return None
 
+    async def stream_to_file(
+        self,
+        url: str,
+        path: str,
+        max_bytes: int,
+    ) -> tuple[bool, str]:
+
+        try:
+
+            timeout = httpx.Timeout(
+                settings.media_timeout
+            )
+
+            async with self.client.stream(
+                "GET",
+                url,
+                timeout=timeout,
+                headers={
+                    "Accept": (
+                        "video/*,"
+                        "image/*,"
+                        "*/*"
+                    ),
+                },
+            ) as response:
+
+                if response.status_code in {
+                    401,
+                    403,
+                    404,
+                }:
+
+                    return (
+                        False,
+                        f"HTTP {response.status_code}",
+                    )
+
+                if response.status_code == 429:
+
+                    return (
+                        False,
+                        "RATE_LIMITED",
+                    )
+
+                if response.status_code >= 400:
+
+                    return (
+                        False,
+                        f"HTTP {response.status_code}",
+                    )
+
+                content_length = response.headers.get(
+                    "content-length"
+                )
+
+                if content_length:
+
+                    try:
+
+                        if int(
+                            content_length
+                        ) > max_bytes:
+
+                            return (
+                                False,
+                                "FILE_TOO_LARGE",
+                            )
+
+                    except ValueError:
+                        pass
+
+                total = 0
+
+                with open(
+                    path,
+                    "wb",
+                ) as file:
+
+                    async for chunk in response.aiter_bytes(
+                        1024 * 64
+                    ):
+
+                        total += len(chunk)
+
+                        if total > max_bytes:
+
+                            return (
+                                False,
+                                "FILE_TOO_LARGE",
+                            )
+
+                        file.write(chunk)
+
+                return (
+                    True,
+                    "OK",
+                )
+
+        except (
+            httpx.TimeoutException,
+        ):
+
+            return (
+                False,
+                "TIMEOUT",
+            )
+
+        except (
+            httpx.NetworkError,
+        ):
+
+            return (
+                False,
+                "NETWORK_ERROR",
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "Media download failed: %s",
+                url,
+            )
+
+            return (
+                False,
+                str(exc),
+            )
+
+
+http_client = HTTPClient(
+    settings.request_timeout
+)
+
 
 # ============================================================
 # PROVIDER BASE
@@ -439,6 +721,12 @@ class Provider:
 
     name = "Unknown"
 
+    PROFILE_TEMPLATE = ""
+
+    NOT_FOUND_MARKERS: tuple[str, ...] = ()
+
+    PRIVATE_MARKERS: tuple[str, ...] = ()
+
     async def check(
         self,
         username: str,
@@ -446,6 +734,22 @@ class Provider:
     ) -> CheckResult:
 
         raise NotImplementedError
+
+    async def profile(
+        self,
+        username: str,
+        http: HTTPClient,
+    ) -> PublicProfile | None:
+
+        return None
+
+    async def media(
+        self,
+        username: str,
+        http: HTTPClient,
+    ) -> list[PublicMedia]:
+
+        return []
 
     def result(
         self,
@@ -469,6 +773,337 @@ class Provider:
             reason=reason,
             data=data or {},
         )
+
+
+# ============================================================
+# HTML PARSING
+# ============================================================
+
+def meta_content(
+    soup,
+    *,
+    name: str | None = None,
+    prop: str | None = None,
+) -> str | None:
+
+    tag = None
+
+    if name:
+
+        tag = soup.find(
+            "meta",
+            attrs={
+                "name": name,
+            },
+        )
+
+    if tag is None and prop:
+
+        tag = soup.find(
+            "meta",
+            attrs={
+                "property": prop,
+            },
+        )
+
+    if tag is None:
+        return None
+
+    value = tag.get(
+        "content"
+    )
+
+    if not value:
+        return None
+
+    return str(value).strip()
+
+
+def extract_json_number(
+    text: str,
+    keys: list[str],
+) -> int | None:
+
+    for key in keys:
+
+        patterns = [
+            rf'"{re.escape(key)}"\s*:\s*(\d+)',
+            rf'"{re.escape(key)}"\s*:\s*"([\d,]+)"',
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                text,
+                re.IGNORECASE,
+            )
+
+            if not match:
+                continue
+
+            raw = (
+                match.group(1)
+                .replace(",", "")
+            )
+
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+
+    return None
+
+
+def extract_boolean(
+    text: str,
+    keys: list[str],
+) -> bool | None:
+
+    for key in keys:
+
+        pattern = (
+            rf'"{re.escape(key)}"'
+            r'\s*:\s*(true|false)'
+        )
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+
+            return (
+                match.group(1).lower()
+                == "true"
+            )
+
+    return None
+
+
+def extract_json_string(
+    text: str,
+    keys: list[str],
+) -> str | None:
+
+    for key in keys:
+
+        pattern = (
+            rf'"{re.escape(key)}"'
+            r'\s*:\s*"([^"]*)"'
+        )
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+
+            value = (
+                match.group(1)
+                .replace(
+                    '\\"',
+                    '"',
+                )
+            )
+
+            if value.strip():
+
+                return value.strip()
+
+    return None
+
+
+def extract_media_from_html(
+    platform: str,
+    username: str,
+    page_url: str,
+    text: str,
+    soup,
+) -> list[PublicMedia]:
+
+    items: list[PublicMedia] = []
+
+    video_urls: list[str] = []
+
+    # --------------------------------------------------------
+    # OpenGraph video
+    # --------------------------------------------------------
+
+    for prop in (
+        "og:video",
+        "og:video:url",
+        "og:video:secure_url",
+    ):
+
+        value = meta_content(
+            soup,
+            prop=prop,
+        )
+
+        if value:
+            video_urls.append(
+                urljoin(
+                    page_url,
+                    value,
+                )
+            )
+
+    # --------------------------------------------------------
+    # HTML <video>
+    # --------------------------------------------------------
+
+    for video in soup.find_all(
+        "video"
+    ):
+
+        src = video.get(
+            "src"
+        )
+
+        if src:
+
+            video_urls.append(
+                urljoin(
+                    page_url,
+                    src,
+                )
+            )
+
+        for source in video.find_all(
+            "source"
+        ):
+
+            src = source.get(
+                "src"
+            )
+
+            if src:
+
+                video_urls.append(
+                    urljoin(
+                        page_url,
+                        src,
+                    )
+                )
+
+    # --------------------------------------------------------
+    # Deduplicate
+    # --------------------------------------------------------
+
+    seen: set[str] = set()
+
+    for video_url in video_urls:
+
+        if video_url in seen:
+            continue
+
+        seen.add(
+            video_url
+        )
+
+        items.append(
+            PublicMedia(
+                platform=platform,
+                username=username,
+                media_type=MediaType.VIDEO,
+                url=video_url,
+                thumbnail_url=meta_content(
+                    soup,
+                    prop="og:image",
+                ),
+                title=meta_content(
+                    soup,
+                    prop="og:title",
+                ),
+                source_url=page_url,
+                downloadable=True,
+            )
+        )
+
+    # --------------------------------------------------------
+    # OpenGraph image
+    # --------------------------------------------------------
+
+    image_url = meta_content(
+        soup,
+        prop="og:image",
+    )
+
+    if image_url:
+
+        items.append(
+            PublicMedia(
+                platform=platform,
+                username=username,
+                media_type=MediaType.IMAGE,
+                url=urljoin(
+                    page_url,
+                    image_url,
+                ),
+                thumbnail_url=urljoin(
+                    page_url,
+                    image_url,
+                ),
+                title=meta_content(
+                    soup,
+                    prop="og:title",
+                ),
+                source_url=page_url,
+                downloadable=True,
+            )
+        )
+
+    # --------------------------------------------------------
+    # HTML images
+    # --------------------------------------------------------
+
+    for image in soup.find_all(
+        "img"
+    )[:20]:
+
+        src = (
+            image.get("src")
+            or image.get("data-src")
+        )
+
+        if not src:
+            continue
+
+        full_url = urljoin(
+            page_url,
+            src,
+        )
+
+        if full_url in seen:
+            continue
+
+        seen.add(
+            full_url
+        )
+
+        items.append(
+            PublicMedia(
+                platform=platform,
+                username=username,
+                media_type=MediaType.IMAGE,
+                url=full_url,
+                title=(
+                    image.get("alt")
+                    or None
+                ),
+                source_url=page_url,
+                downloadable=True,
+            )
+        )
+
+    return items[
+        :settings.max_media_items
+    ]
 
 
 # ============================================================
@@ -512,8 +1147,8 @@ class GitHubProvider(
                 username,
                 Status.UNKNOWN,
                 reason=(
-                    "GitHub API request "
-                    "failed or timed out."
+                    "GitHub API request failed "
+                    "or timed out."
                 ),
             )
 
@@ -565,16 +1200,13 @@ class GitHubProvider(
             return self.result(
                 username,
                 Status.UNKNOWN,
-                reason=(
-                    "Invalid JSON returned "
-                    "by GitHub."
-                ),
+                reason="Invalid GitHub JSON.",
             )
 
         login = str(
             data.get(
                 "login",
-                ""
+                "",
             )
         )
 
@@ -584,8 +1216,7 @@ class GitHubProvider(
                 username,
                 Status.UNKNOWN,
                 reason=(
-                    "GitHub response did not "
-                    "match requested username."
+                    "GitHub username mismatch."
                 ),
             )
 
@@ -594,8 +1225,7 @@ class GitHubProvider(
             Status.CONFIRMED,
             confidence=100,
             profile_url=data.get(
-                "html_url",
-                f"https://github.com/{username}",
+                "html_url"
             ),
             evidence=[
                 Evidence(
@@ -608,10 +1238,18 @@ class GitHubProvider(
                 ),
             ],
             data={
-                "name": data.get("name"),
-                "bio": data.get("bio"),
-                "company": data.get("company"),
-                "location": data.get("location"),
+                "name": data.get(
+                    "name"
+                ),
+                "bio": data.get(
+                    "bio"
+                ),
+                "company": data.get(
+                    "company"
+                ),
+                "location": data.get(
+                    "location"
+                ),
                 "public_repos": data.get(
                     "public_repos"
                 ),
@@ -621,10 +1259,51 @@ class GitHubProvider(
                 "following": data.get(
                     "following"
                 ),
+                "public_gists": data.get(
+                    "public_gists"
+                ),
                 "created_at": data.get(
                     "created_at"
                 ),
+                "updated_at": data.get(
+                    "updated_at"
+                ),
             },
+        )
+
+    async def profile(
+        self,
+        username: str,
+        http: HTTPClient,
+    ) -> PublicProfile | None:
+
+        result = await self.check(
+            username,
+            http,
+        )
+
+        if result.status != Status.CONFIRMED:
+            return None
+
+        data = result.data
+
+        return PublicProfile(
+            platform=self.name,
+            username=username,
+            display_name=data.get(
+                "name"
+            ),
+            bio=data.get(
+                "bio"
+            ),
+            followers=data.get(
+                "followers"
+            ),
+            following=data.get(
+                "following"
+            ),
+            website=None,
+            profile_url=result.profile_url,
         )
 
 
@@ -657,7 +1336,7 @@ class RedditProvider(
             url,
             headers={
                 "User-Agent":
-                    "UsernameChecker/1.0",
+                    "UsernameChecker/2.0",
             },
         )
 
@@ -667,8 +1346,7 @@ class RedditProvider(
                 username,
                 Status.UNKNOWN,
                 reason=(
-                    "Reddit request failed "
-                    "or timed out."
+                    "Reddit request failed."
                 ),
             )
 
@@ -706,8 +1384,8 @@ class RedditProvider(
                 username,
                 Status.UNKNOWN,
                 reason=(
-                    "Reddit returned HTTP "
-                    f"{response.status_code}."
+                    f"Reddit returned "
+                    f"HTTP {response.status_code}."
                 ),
             )
 
@@ -725,16 +1403,13 @@ class RedditProvider(
             return self.result(
                 username,
                 Status.UNKNOWN,
-                reason=(
-                    "Invalid JSON returned "
-                    "by Reddit."
-                ),
+                reason="Invalid Reddit JSON.",
             )
 
         account_name = str(
             data.get(
                 "name",
-                ""
+                "",
             )
         )
 
@@ -746,10 +1421,7 @@ class RedditProvider(
             return self.result(
                 username,
                 Status.UNKNOWN,
-                reason=(
-                    "Reddit response did not "
-                    "match username."
-                ),
+                reason="Reddit username mismatch.",
             )
 
         return self.result(
@@ -777,12 +1449,40 @@ class RedditProvider(
                 "comment_karma": data.get(
                     "comment_karma"
                 ),
+                "is_gold": data.get(
+                    "is_gold"
+                ),
             },
+        )
+
+    async def profile(
+        self,
+        username: str,
+        http: HTTPClient,
+    ) -> PublicProfile | None:
+
+        result = await self.check(
+            username,
+            http,
+        )
+
+        if result.status != Status.CONFIRMED:
+            return None
+
+        return PublicProfile(
+            platform=self.name,
+            username=username,
+            display_name=result.data.get(
+                "name"
+            ),
+            followers=None,
+            following=None,
+            profile_url=result.profile_url,
         )
 
 
 # ============================================================
-# HTML PROVIDER
+# GENERIC HTML PROVIDER
 # ============================================================
 
 class HTMLProvider(
@@ -793,11 +1493,16 @@ class HTMLProvider(
 
     NOT_FOUND_MARKERS: tuple[str, ...] = ()
 
-    async def check(
+    PRIVATE_MARKERS: tuple[str, ...] = ()
+
+    async def fetch_page(
         self,
         username: str,
         http: HTTPClient,
-    ) -> CheckResult:
+    ) -> tuple[
+        str,
+        httpx.Response | None,
+    ]:
 
         url = self.PROFILE_TEMPLATE.format(
             username=username
@@ -805,6 +1510,29 @@ class HTMLProvider(
 
         response = await http.get(
             url
+        )
+
+        if response is None:
+
+            return (
+                url,
+                None,
+            )
+
+        return (
+            url,
+            response,
+        )
+
+    async def check(
+        self,
+        username: str,
+        http: HTTPClient,
+    ) -> CheckResult:
+
+        url, response = await self.fetch_page(
+            username,
+            http,
         )
 
         if response is None:
@@ -835,17 +1563,26 @@ class HTMLProvider(
             )
 
         if response.status_code in {
+            401,
             403,
             429,
         }:
 
+            if response.status_code == 429:
+
+                status = Status.RATE_LIMITED
+
+            else:
+
+                status = Status.UNKNOWN
+
             return self.result(
                 username,
-                Status.RATE_LIMITED,
+                status,
                 profile_url=url,
                 reason=(
-                    "Platform returned HTTP "
-                    f"{response.status_code}."
+                    f"Platform returned "
+                    f"HTTP {response.status_code}."
                 ),
             )
 
@@ -856,7 +1593,7 @@ class HTMLProvider(
                 Status.UNKNOWN,
                 profile_url=url,
                 reason=(
-                    "Platform server returned "
+                    f"Platform server returned "
                     f"HTTP {response.status_code}."
                 ),
             )
@@ -868,16 +1605,18 @@ class HTMLProvider(
                 Status.UNKNOWN,
                 profile_url=url,
                 reason=(
-                    "Platform returned HTTP "
-                    f"{response.status_code}."
+                    f"Platform returned "
+                    f"HTTP {response.status_code}."
                 ),
             )
 
-        text = response.text.lower()
+        text = response.text
+
+        lower_text = text.lower()
 
         for marker in self.NOT_FOUND_MARKERS:
 
-            if marker.lower() in text:
+            if marker.lower() in lower_text:
 
                 return self.result(
                     username,
@@ -895,6 +1634,102 @@ class HTMLProvider(
                     ],
                 )
 
+        for marker in self.PRIVATE_MARKERS:
+
+            if marker.lower() in lower_text:
+
+                return self.result(
+                    username,
+                    Status.PRIVATE,
+                    confidence=80,
+                    profile_url=url,
+                    evidence=[
+                        Evidence(
+                            (
+                                "Page indicated "
+                                f"restricted/private content: {marker}"
+                            ),
+                            80,
+                        )
+                    ],
+                )
+
+        try:
+
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(
+                text,
+                "html.parser",
+            )
+
+        except Exception:
+
+            return self.result(
+                username,
+                Status.UNKNOWN,
+                profile_url=url,
+                reason="HTML parsing failed.",
+            )
+
+        og_title = meta_content(
+            soup,
+            prop="og:title",
+        )
+
+        og_description = meta_content(
+            soup,
+            prop="og:description",
+        )
+
+        og_image = meta_content(
+            soup,
+            prop="og:image",
+        )
+
+        title = (
+            soup.title.string.strip()
+            if soup.title
+            and soup.title.string
+            else None
+        )
+
+        # A page with strong profile metadata
+        # is better evidence than HTTP 200 alone.
+        strong_evidence = any(
+            [
+                og_title,
+                og_description,
+                og_image,
+                title,
+            ]
+        )
+
+        if strong_evidence:
+
+            return self.result(
+                username,
+                Status.CONFIRMED,
+                confidence=75,
+                profile_url=url,
+                evidence=[
+                    Evidence(
+                        "Public profile page returned usable metadata.",
+                        50,
+                    ),
+                    Evidence(
+                        "Profile page contains OpenGraph/title metadata.",
+                        25,
+                    ),
+                ],
+                data={
+                    "title": title,
+                    "og_title": og_title,
+                    "og_description": og_description,
+                    "og_image": og_image,
+                },
+            )
+
         return self.result(
             username,
             Status.UNKNOWN,
@@ -904,6 +1739,166 @@ class HTMLProvider(
                 "not enough evidence to confirm "
                 "the account."
             ),
+        )
+
+    async def profile(
+        self,
+        username: str,
+        http: HTTPClient,
+    ) -> PublicProfile | None:
+
+        url, response = await self.fetch_page(
+            username,
+            http,
+        )
+
+        if response is None:
+            return None
+
+        if response.status_code != 200:
+            return None
+
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+
+        title = meta_content(
+            soup,
+            prop="og:title",
+        )
+
+        description = meta_content(
+            soup,
+            prop="og:description",
+        )
+
+        image = meta_content(
+            soup,
+            prop="og:image",
+        )
+
+        text = response.text
+
+        followers = extract_json_number(
+            text,
+            [
+                "followerCount",
+                "followers",
+                "followersCount",
+            ],
+        )
+
+        following = extract_json_number(
+            text,
+            [
+                "followingCount",
+                "following",
+            ],
+        )
+
+        likes = extract_json_number(
+            text,
+            [
+                "heartCount",
+                "likes",
+                "likeCount",
+            ],
+        )
+
+        videos = extract_json_number(
+            text,
+            [
+                "videoCount",
+                "videos",
+                "video_count",
+            ],
+        )
+
+        verified = extract_boolean(
+            text,
+            [
+                "verified",
+                "isVerified",
+            ],
+        )
+
+        website = extract_json_string(
+            text,
+            [
+                "website",
+                "websiteUrl",
+                "bioLink",
+            ],
+        )
+
+        display_name = (
+            title
+            or extract_json_string(
+                text,
+                [
+                    "nickname",
+                    "displayName",
+                    "name",
+                ],
+            )
+        )
+
+        return PublicProfile(
+            platform=self.name,
+            username=username,
+            display_name=display_name,
+            bio=description,
+            avatar_url=(
+                urljoin(
+                    url,
+                    image,
+                )
+                if image
+                else None
+            ),
+            followers=followers,
+            following=following,
+            likes=likes,
+            videos=videos,
+            verified=verified,
+            website=website,
+            profile_url=url,
+            raw_source=response.text,
+        )
+
+    async def media(
+        self,
+        username: str,
+        http: HTTPClient,
+    ) -> list[PublicMedia]:
+
+        url, response = await self.fetch_page(
+            username,
+            http,
+        )
+
+        if response is None:
+            return []
+
+        if response.status_code != 200:
+            return []
+
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+
+        return extract_media_from_html(
+            self.name,
+            username,
+            url,
+            response.text,
+            soup,
         )
 
 
@@ -927,6 +1922,11 @@ class InstagramProvider(
         "the link you followed may be broken",
     )
 
+    PRIVATE_MARKERS = (
+        "this account is private",
+        "account is private",
+    )
+
 
 # ============================================================
 # TIKTOK
@@ -946,6 +1946,12 @@ class TikTokProvider(
         "couldn't find this account",
         "couldn't find this page",
         "page not found",
+        "account doesn't exist",
+    )
+
+    PRIVATE_MARKERS = (
+        "private account",
+        "this account is private",
     )
 
 
@@ -967,6 +1973,10 @@ class SnapchatProvider(
         "page not found",
         "couldn't find",
         "doesn't exist",
+    )
+
+    PRIVATE_MARKERS = (
+        "private",
     )
 
 
@@ -1046,6 +2056,15 @@ PROVIDERS: list[Provider] = [
 ]
 
 
+PROVIDER_MAP: dict[
+    str,
+    Provider,
+] = {
+    provider.name.lower(): provider
+    for provider in PROVIDERS
+}
+
+
 # ============================================================
 # ENGINE
 # ============================================================
@@ -1055,12 +2074,10 @@ class CheckEngine:
     def __init__(
         self,
         http: HTTPClient,
-        cache: ResultCache,
         max_concurrency: int,
     ):
 
         self.http = http
-        self.cache = cache
 
         self.semaphore = asyncio.Semaphore(
             max_concurrency
@@ -1070,19 +2087,25 @@ class CheckEngine:
         self,
         provider: Provider,
         username: str,
+        *,
+        force: bool = False,
     ) -> CheckResult:
 
         cache_key = (
+            f"check:"
             f"{provider.name.lower()}:"
             f"{username.lower()}"
         )
 
-        cached = await self.cache.get(
-            cache_key
-        )
+        if not force:
 
-        if cached:
-            return cached
+            cached = await result_cache.get(
+                cache_key
+            )
+
+            if cached:
+
+                return cached
 
         async with self.semaphore:
 
@@ -1094,6 +2117,7 @@ class CheckEngine:
                 )
 
             except asyncio.CancelledError:
+
                 raise
 
             except Exception as exc:
@@ -1112,9 +2136,10 @@ class CheckEngine:
         if result.status in {
             Status.CONFIRMED,
             Status.NOT_FOUND,
+            Status.PRIVATE,
         }:
 
-            await self.cache.set(
+            await result_cache.set(
                 cache_key,
                 result,
             )
@@ -1124,12 +2149,15 @@ class CheckEngine:
     async def check(
         self,
         username: str,
+        *,
+        force: bool = False,
     ) -> list[CheckResult]:
 
         tasks = [
             self.run_provider(
                 provider,
                 username,
+                force=force,
             )
             for provider in PROVIDERS
         ]
@@ -1138,26 +2166,251 @@ class CheckEngine:
             *tasks
         )
 
+    async def get_profile(
+        self,
+        provider: Provider,
+        username: str,
+        *,
+        force: bool = False,
+    ) -> PublicProfile | None:
+
+        key = (
+            f"profile:"
+            f"{provider.name.lower()}:"
+            f"{username.lower()}"
+        )
+
+        if not force:
+
+            cached = await media_cache.get(
+                key
+            )
+
+            if cached is not None:
+
+                return cached
+
+        async with self.semaphore:
+
+            try:
+
+                profile = await provider.profile(
+                    username,
+                    self.http,
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Profile extraction failed: %s",
+                    provider.name,
+                )
+
+                profile = None
+
+        if profile:
+
+            await media_cache.set(
+                key,
+                profile,
+            )
+
+        return profile
+
+    async def get_media(
+        self,
+        provider: Provider,
+        username: str,
+        *,
+        force: bool = False,
+    ) -> list[PublicMedia]:
+
+        key = (
+            f"media:"
+            f"{provider.name.lower()}:"
+            f"{username.lower()}"
+        )
+
+        if not force:
+
+            cached = await media_cache.get(
+                key
+            )
+
+            if cached is not None:
+
+                return cached
+
+        async with self.semaphore:
+
+            try:
+
+                items = await provider.media(
+                    username,
+                    self.http,
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Media extraction failed: %s",
+                    provider.name,
+                )
+
+                items = []
+
+        await media_cache.set(
+            key,
+            items,
+        )
+
+        return items
+
+
+engine = CheckEngine(
+    http_client,
+    settings.max_concurrency,
+)
+
+
+# ============================================================
+# USER STATE
+# ============================================================
+
+@dataclass
+class UserSession:
+    username: str
+    results: list[CheckResult]
+
+    selected_platform: str | None = None
+
+    media: list[PublicMedia] = field(
+        default_factory=list
+    )
+
+    media_page: int = 0
+
+
+USER_SESSIONS: dict[
+    int,
+    UserSession,
+] = {}
+
 
 # ============================================================
 # TELEGRAM UI
 # ============================================================
 
-def build_keyboard():
+def platform_callback(
+    platform: str,
+) -> str:
+
+    normalized = (
+        platform.lower()
+        .replace(" ", "_")
+    )
+
+    return (
+        f"platform:{normalized}"
+    )
+
+
+def build_summary_keyboard(
+    results: list[CheckResult],
+) -> InlineKeyboardMarkup:
+
+    rows: list[
+        list[InlineKeyboardButton]
+    ] = []
+
+    current: list[
+        InlineKeyboardButton
+    ] = []
+
+    for result in results:
+
+        if result.status != Status.CONFIRMED:
+            continue
+
+        current.append(
+            InlineKeyboardButton(
+                text=(
+                    f"{status_icon(result.status)} "
+                    f"{result.platform}"
+                ),
+                callback_data=platform_callback(
+                    result.platform
+                ),
+            )
+        )
+
+        if len(current) == 2:
+
+            rows.append(
+                current
+            )
+
+            current = []
+
+    if current:
+        rows.append(
+            current
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📊 التفاصيل",
+                callback_data="details",
+            ),
+            InlineKeyboardButton(
+                text="🔄 إعادة الفحص",
+                callback_data="recheck",
+            ),
+        ]
+    )
 
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔄 إعادة الفحص",
-                    callback_data="recheck",
+        inline_keyboard=rows
+    )
+
+
+def build_platform_keyboard(
+    platform: str,
+) -> InlineKeyboardMarkup:
+
+    normalized = (
+        platform.lower()
+        .replace(" ", "_")
+    )
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="👤 معلومات الحساب",
+                callback_data=(
+                    f"profile:{normalized}"
                 ),
-                InlineKeyboardButton(
-                    text="📊 التفاصيل",
-                    callback_data="details",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🎬 المحتوى العام",
+                callback_data=(
+                    f"media:{normalized}:0"
                 ),
-            ],
-        ]
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⬅️ رجوع",
+                callback_data="summary",
+            )
+        ],
+    ]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
     )
 
 
@@ -1191,8 +2444,10 @@ def format_summary(
             f"<b>{counts[Status.UNKNOWN]}</b>\n"
             f"🟡 Rate Limited: "
             f"<b>{counts[Status.RATE_LIMITED]}</b>\n"
-            f"⚫ Error: "
-            f"<b>{counts[Status.ERROR]}</b>"
+            f"🔒 Private: "
+            f"<b>{counts[Status.PRIVATE]}</b>\n"
+            f"⚪ Unavailable: "
+            f"<b>{counts[Status.UNAVAILABLE]}</b>"
         ),
         "",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -1208,6 +2463,7 @@ def format_summary(
         )
 
         if result.profile_url:
+
             line += (
                 " "
                 + make_link(
@@ -1216,15 +2472,21 @@ def format_summary(
                 )
             )
 
-        lines.append(line)
+        lines.append(
+            line
+        )
 
     lines.extend(
         [
             "",
             (
+                "👇 <b>اضغط على المنصة</b> "
+                "لفتح تفاصيل الحساب والمحتوى العام."
+            ),
+            "",
+            (
                 "⚠️ <i>UNKNOWN لا يعني أن الحساب "
-                "غير موجود؛ يعني فقط أنه لم يتم "
-                "الحصول على دليل كافٍ.</i>"
+                "غير موجود.</i>"
             ),
         ]
     )
@@ -1262,6 +2524,7 @@ def format_details(
         )
 
         if result.confidence:
+
             lines.append(
                 f"<code>"
                 f"{confidence_bar(result.confidence)}"
@@ -1269,8 +2532,9 @@ def format_details(
             )
 
         if result.reason:
+
             lines.append(
-                f"Reason: "
+                "Reason: "
                 f"{esc(result.reason)}"
             )
 
@@ -1287,6 +2551,32 @@ def format_details(
                     f"{esc(evidence.message)}"
                 )
 
+        if result.data:
+
+            lines.append(
+                "Public data:"
+            )
+
+            for key, value in result.data.items():
+
+                if value is None:
+                    continue
+
+                if isinstance(
+                    value,
+                    str,
+                ) and len(value) > 250:
+
+                    value = (
+                        value[:247]
+                        + "..."
+                    )
+
+                lines.append(
+                    f"• <b>{esc(key)}</b>: "
+                    f"{esc(value)}"
+                )
+
         if result.profile_url:
 
             lines.append(
@@ -1301,50 +2591,356 @@ def format_details(
     return "\n".join(lines)
 
 
-# ============================================================
-# STATE
-# ============================================================
+def format_profile(
+    profile: PublicProfile,
+) -> str:
 
-USER_RESULTS: dict[
-    int,
-    tuple[
-        str,
-        list[CheckResult]
+    lines = [
+        (
+            f"👤 <b>{esc(profile.platform)} "
+            f"Profile</b>"
+        ),
+        "",
+        (
+            f"Username: "
+            f"<code>@{esc(profile.username)}</code>"
+        ),
     ]
-] = {}
+
+    if profile.display_name:
+
+        lines.append(
+            f"Display name: "
+            f"<b>{esc(profile.display_name)}</b>"
+        )
+
+    if profile.bio:
+
+        bio = profile.bio
+
+        if len(bio) > 600:
+
+            bio = (
+                bio[:597]
+                + "..."
+            )
+
+        lines.extend(
+            [
+                "",
+                "📝 <b>Bio</b>",
+                esc(bio),
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "📊 <b>Statistics</b>",
+            (
+                "Followers: "
+                f"<b>{compact_number(profile.followers)}</b>"
+            ),
+            (
+                "Following: "
+                f"<b>{compact_number(profile.following)}</b>"
+            ),
+            (
+                "Likes: "
+                f"<b>{compact_number(profile.likes)}</b>"
+            ),
+            (
+                "Videos: "
+                f"<b>{compact_number(profile.videos)}</b>"
+            ),
+        ]
+    )
+
+    if profile.verified is not None:
+
+        lines.append(
+            "Verified: "
+            f"<b>{'YES' if profile.verified else 'NO'}</b>"
+        )
+
+    if profile.website:
+
+        lines.append(
+            make_link(
+                "🌐 Website",
+                profile.website,
+            )
+        )
+
+    if profile.profile_url:
+
+        lines.extend(
+            [
+                "",
+                make_link(
+                    "🔗 Open profile",
+                    profile.profile_url,
+                ),
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            (
+                "ℹ️ <i>Only information available "
+                "from the public page is displayed.</i>"
+            ),
+        ]
+    )
+
+    return "\n".join(lines)
 
 
-# ============================================================
-# GLOBAL OBJECTS
-# ============================================================
+def format_media_list(
+    platform: str,
+    username: str,
+    items: list[PublicMedia],
+    page: int,
+) -> str:
 
-http_client = HTTPClient(
-    settings.request_timeout
-)
+    per_page = 5
 
-cache = ResultCache(
-    settings.cache_ttl
-)
+    total_pages = max(
+        1,
+        (
+            len(items)
+            + per_page
+            - 1
+        )
+        // per_page,
+    )
 
-engine = CheckEngine(
-    http_client,
-    cache,
-    settings.max_concurrency,
-)
+    page = max(
+        0,
+        min(
+            page,
+            total_pages - 1,
+        ),
+    )
+
+    start = page * per_page
+
+    current = items[
+        start:start + per_page
+    ]
+
+    lines = [
+        (
+            f"🎬 <b>{esc(platform)} "
+            f"Public Content</b>"
+        ),
+        "",
+        (
+            f"👤 "
+            f"<code>@{esc(username)}</code>"
+        ),
+        "",
+    ]
+
+    if not current:
+
+        lines.extend(
+            [
+                "⚪ <b>لا يوجد محتوى قابل للاستخراج.</b>",
+                "",
+                (
+                    "قد يكون المحتوى غير متاح للطلب العام "
+                    "أو يتطلب وصولًا غير متوفر."
+                ),
+            ]
+        )
+
+    else:
+
+        for index, item in enumerate(
+            current,
+            start=start + 1,
+        ):
+
+            lines.append(
+                (
+                    f"{index}. "
+                    f"{'🎬' if item.media_type == MediaType.VIDEO else '🖼️'} "
+                    f"<b>{item.media_type.value}</b>"
+                )
+            )
+
+            if item.title:
+
+                title = item.title
+
+                if len(title) > 100:
+                    title = (
+                        title[:97]
+                        + "..."
+                    )
+
+                lines.append(
+                    f"   {esc(title)}"
+                )
+
+            lines.append(
+                "   "
+                + (
+                    "📥 قابل للجلب"
+                    if item.downloadable
+                    else "⚪ غير متاح مباشرة"
+                )
+            )
+
+            lines.append("")
+
+    lines.append(
+        f"📄 Page {page + 1}/{total_pages}"
+    )
+
+    return "\n".join(lines)
 
 
-# ============================================================
-# DISPATCHER
-# ============================================================
+def build_media_keyboard(
+    platform: str,
+    items: list[PublicMedia],
+    page: int,
+) -> InlineKeyboardMarkup:
 
-dp = Dispatcher()
+    normalized = (
+        platform.lower()
+        .replace(" ", "_")
+    )
+
+    per_page = 5
+
+    total_pages = max(
+        1,
+        (
+            len(items)
+            + per_page
+            - 1
+        )
+        // per_page,
+    )
+
+    page = max(
+        0,
+        min(
+            page,
+            total_pages - 1,
+        ),
+    )
+
+    start = page * per_page
+
+    current = items[
+        start:start + per_page
+    ]
+
+    rows: list[
+        list[InlineKeyboardButton]
+    ] = []
+
+    for index, item in enumerate(
+        current,
+        start=start,
+    ):
+
+        icon = (
+            "🎬"
+            if item.media_type == MediaType.VIDEO
+            else "🖼️"
+        )
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=(
+                        f"{icon} المحتوى "
+                        f"#{index + 1}"
+                    ),
+                    callback_data=(
+                        f"getmedia:"
+                        f"{normalized}:"
+                        f"{index}"
+                    ),
+                )
+            ]
+        )
+
+    navigation: list[
+        InlineKeyboardButton
+    ] = []
+
+    if page > 0:
+
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=(
+                    f"media:"
+                    f"{normalized}:"
+                    f"{page - 1}"
+                ),
+            )
+        )
+
+    navigation.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="noop",
+        )
+    )
+
+    if page < total_pages - 1:
+
+        navigation.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=(
+                    f"media:"
+                    f"{normalized}:"
+                    f"{page + 1}"
+                ),
+            )
+        )
+
+    rows.append(
+        navigation
+    )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="👤 الحساب",
+                callback_data=(
+                    f"profile:{normalized}"
+                ),
+            ),
+            InlineKeyboardButton(
+                text="⬅️ رجوع",
+                callback_data=(
+                    f"platform:{normalized}"
+                ),
+            ),
+        ]
+    )
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
+    )
 
 
 # ============================================================
 # /START
 # ============================================================
 
-@dp.message(Command("start"))
+@dp.message(
+    Command("start")
+)
 async def start_handler(
     message: Message,
 ):
@@ -1354,7 +2950,8 @@ async def start_handler(
         "أرسل اسم المستخدم فقط.\n\n"
         "مثال:\n"
         "<code>example</code>\n\n"
-        "وسأفحص المصادر المتاحة."
+        "بعد الفحص يمكنك الضغط على أي منصة "
+        "لعرض المعلومات العامة والمحتوى المتاح."
     )
 
 
@@ -1362,21 +2959,25 @@ async def start_handler(
 # /HELP
 # ============================================================
 
-@dp.message(Command("help"))
+@dp.message(
+    Command("help")
+)
 async def help_handler(
     message: Message,
 ):
 
     await message.answer(
         "ℹ️ <b>طريقة الاستخدام</b>\n\n"
-        "أرسل Username بدون @.\n\n"
-        "مثال:\n"
-        "<code>example</code>\n\n"
-        "🟢 CONFIRMED = دليل قوي على وجود الحساب\n"
-        "🔴 NOT FOUND = دليل على عدم وجود الحساب\n"
+        "1️⃣ أرسل Username بدون @.\n"
+        "2️⃣ انتظر نتائج الفحص.\n"
+        "3️⃣ اضغط على المنصة.\n"
+        "4️⃣ اختر معلومات الحساب أو المحتوى العام.\n\n"
+        "🟢 CONFIRMED = دليل قوي\n"
+        "🔴 NOT FOUND = دليل على عدم العثور\n"
         "🟠 UNKNOWN = لا يوجد دليل كافٍ\n"
-        "🟡 RATE LIMITED = المنصة حدّت الطلبات\n"
-        "⚫ ERROR = خطأ غير متوقع"
+        "🟡 RATE LIMITED = حد طلبات\n"
+        "🔒 PRIVATE = حساب/محتوى خاص\n"
+        "⚪ UNAVAILABLE = المحتوى غير متاح للطلب العام"
     )
 
 
@@ -1384,7 +2985,9 @@ async def help_handler(
 # USERNAME CHECK
 # ============================================================
 
-@dp.message(F.text)
+@dp.message(
+    F.text
+)
 async def username_handler(
     message: Message,
 ):
@@ -1454,11 +3057,11 @@ async def username_handler(
         - started
     )
 
-    USER_RESULTS[
+    USER_SESSIONS[
         message.chat.id
-    ] = (
-        username,
-        results,
+    ] = UserSession(
+        username=username,
+        results=results,
     )
 
     text = format_summary(
@@ -1473,8 +3076,605 @@ async def username_handler(
 
     await status_message.edit_text(
         text,
-        reply_markup=build_keyboard(),
+        reply_markup=build_summary_keyboard(
+            results
+        ),
     )
+
+
+# ============================================================
+# PLATFORM
+# ============================================================
+
+@dp.callback_query(
+    F.data.startswith("platform:")
+)
+async def platform_callback_handler(
+    callback: CallbackQuery,
+):
+
+    if not callback.message:
+        await callback.answer()
+        return
+
+    raw_platform = (
+        callback.data
+        .split(
+            ":",
+            1,
+        )[1]
+    )
+
+    platform = raw_platform.replace(
+        "_",
+        " ",
+    )
+
+    session = USER_SESSIONS.get(
+        callback.message.chat.id
+    )
+
+    if not session:
+
+        await callback.answer(
+            "لا توجد جلسة.",
+            show_alert=True,
+        )
+
+        return
+
+    provider = PROVIDER_MAP.get(
+        platform.lower()
+    )
+
+    if not provider:
+
+        await callback.answer(
+            "المنصة غير مدعومة.",
+            show_alert=True,
+        )
+
+        return
+
+    session.selected_platform = (
+        provider.name
+    )
+
+    result = next(
+        (
+            item
+            for item in session.results
+            if item.platform.lower()
+            == provider.name.lower()
+        ),
+        None,
+    )
+
+    if not result:
+
+        await callback.answer(
+            "لا توجد نتيجة لهذه المنصة.",
+            show_alert=True,
+        )
+
+        return
+
+    text = (
+        f"{status_icon(result.status)} "
+        f"<b>{esc(provider.name)}</b>\n\n"
+        f"Username: "
+        f"<code>@{esc(session.username)}</code>\n\n"
+        f"Status: "
+        f"<b>{status_name(result.status)}</b>\n"
+        f"Confidence: "
+        f"<b>{result.confidence}%</b>"
+    )
+
+    if result.profile_url:
+
+        text += (
+            "\n\n"
+            + make_link(
+                "🔗 فتح الحساب",
+                result.profile_url,
+            )
+        )
+
+    if result.status != Status.CONFIRMED:
+
+        text += (
+            "\n\n"
+            "⚠️ لا يمكن استخراج المحتوى "
+            "إلا عندما يكون متاحًا للعامة."
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=build_platform_keyboard(
+            provider.name
+        ),
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# PROFILE
+# ============================================================
+
+@dp.callback_query(
+    F.data.startswith("profile:")
+)
+async def profile_callback_handler(
+    callback: CallbackQuery,
+):
+
+    if not callback.message:
+        await callback.answer()
+        return
+
+    raw_platform = (
+        callback.data
+        .split(
+            ":",
+            1,
+        )[1]
+    )
+
+    platform = raw_platform.replace(
+        "_",
+        " ",
+    )
+
+    session = USER_SESSIONS.get(
+        callback.message.chat.id
+    )
+
+    if not session:
+
+        await callback.answer(
+            "لا توجد جلسة.",
+            show_alert=True,
+        )
+
+        return
+
+    provider = PROVIDER_MAP.get(
+        platform.lower()
+    )
+
+    if not provider:
+
+        await callback.answer(
+            "المنصة غير مدعومة.",
+            show_alert=True,
+        )
+
+        return
+
+    await callback.answer(
+        "⏳ جاري استخراج المعلومات العامة..."
+    )
+
+    profile = await engine.get_profile(
+        provider,
+        session.username,
+    )
+
+    if not profile:
+
+        await callback.message.edit_text(
+            (
+                f"⚪ <b>{esc(provider.name)}</b>\n\n"
+                "لم أتمكن من استخراج بيانات عامة "
+                "كافية من الصفحة الحالية.\n\n"
+                "هذا لا يعني أن الحساب غير موجود."
+            ),
+            reply_markup=build_platform_keyboard(
+                provider.name
+            ),
+        )
+
+        return
+
+    await callback.message.edit_text(
+        format_profile(
+            profile
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🎬 المحتوى العام",
+                        callback_data=(
+                            "media:"
+                            + provider.name.lower()
+                            .replace(
+                                " ",
+                                "_",
+                            )
+                            + ":0"
+                        ),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ رجوع",
+                        callback_data=(
+                            "platform:"
+                            + provider.name.lower()
+                            .replace(
+                                " ",
+                                "_",
+                            )
+                        ),
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+# ============================================================
+# MEDIA LIST
+# ============================================================
+
+@dp.callback_query(
+    F.data.startswith("media:")
+)
+async def media_callback_handler(
+    callback: CallbackQuery,
+):
+
+    if not callback.message:
+        await callback.answer()
+        return
+
+    parts = callback.data.split(
+        ":"
+    )
+
+    if len(parts) != 3:
+
+        await callback.answer(
+            "طلب غير صالح.",
+            show_alert=True,
+        )
+
+        return
+
+    raw_platform = parts[1]
+
+    try:
+        page = int(parts[2])
+    except ValueError:
+        page = 0
+
+    platform = raw_platform.replace(
+        "_",
+        " ",
+    )
+
+    session = USER_SESSIONS.get(
+        callback.message.chat.id
+    )
+
+    if not session:
+
+        await callback.answer(
+            "لا توجد جلسة.",
+            show_alert=True,
+        )
+
+        return
+
+    provider = PROVIDER_MAP.get(
+        platform.lower()
+    )
+
+    if not provider:
+
+        await callback.answer(
+            "المنصة غير مدعومة.",
+            show_alert=True,
+        )
+
+        return
+
+    await callback.answer(
+        "⏳ جاري البحث عن المحتوى العام..."
+    )
+
+    items = await engine.get_media(
+        provider,
+        session.username,
+    )
+
+    session.selected_platform = (
+        provider.name
+    )
+
+    session.media = items
+
+    session.media_page = page
+
+    await callback.message.edit_text(
+        format_media_list(
+            provider.name,
+            session.username,
+            items,
+            page,
+        ),
+        reply_markup=build_media_keyboard(
+            provider.name,
+            items,
+            page,
+        ),
+    )
+
+
+# ============================================================
+# GET MEDIA
+# ============================================================
+
+@dp.callback_query(
+    F.data.startswith("getmedia:")
+)
+async def get_media_callback_handler(
+    callback: CallbackQuery,
+):
+
+    if not callback.message:
+        await callback.answer()
+        return
+
+    parts = callback.data.split(
+        ":"
+    )
+
+    if len(parts) != 3:
+
+        await callback.answer(
+            "طلب غير صالح.",
+            show_alert=True,
+        )
+
+        return
+
+    raw_platform = parts[1]
+
+    try:
+        index = int(parts[2])
+    except ValueError:
+
+        await callback.answer(
+            "رقم المحتوى غير صالح.",
+            show_alert=True,
+        )
+
+        return
+
+    platform = raw_platform.replace(
+        "_",
+        " ",
+    )
+
+    session = USER_SESSIONS.get(
+        callback.message.chat.id
+    )
+
+    if not session:
+
+        await callback.answer(
+            "لا توجد جلسة.",
+            show_alert=True,
+        )
+
+        return
+
+    provider = PROVIDER_MAP.get(
+        platform.lower()
+    )
+
+    if not provider:
+
+        await callback.answer(
+            "المنصة غير مدعومة.",
+            show_alert=True,
+        )
+
+        return
+
+    # If media isn't loaded yet, load it.
+    if not session.media:
+
+        await callback.answer(
+            "⏳ جاري جلب المحتوى..."
+        )
+
+        session.media = await engine.get_media(
+            provider,
+            session.username,
+        )
+
+    if index < 0 or index >= len(
+        session.media
+    ):
+
+        await callback.answer(
+            "المحتوى غير موجود.",
+            show_alert=True,
+        )
+
+        return
+
+    item = session.media[
+        index
+    ]
+
+    if not item.downloadable:
+
+        await callback.answer(
+            "هذا المحتوى غير متاح كملف مباشر.",
+            show_alert=True,
+        )
+
+        return
+
+    await callback.answer(
+        "⏳ جاري جلب الملف العام..."
+    )
+
+    temp_dir = "/tmp/username_checker"
+
+    os.makedirs(
+        temp_dir,
+        exist_ok=True,
+    )
+
+    extension = (
+        ".mp4"
+        if item.media_type
+        == MediaType.VIDEO
+        else ".jpg"
+    )
+
+    filename = (
+        f"{callback.message.chat.id}_"
+        f"{int(time.time())}"
+        f"{extension}"
+    )
+
+    path = os.path.join(
+        temp_dir,
+        filename,
+    )
+
+    max_bytes = (
+        settings.max_media_size_mb
+        * 1024
+        * 1024
+    )
+
+    ok, reason = await http_client.stream_to_file(
+        item.url,
+        path,
+        max_bytes,
+    )
+
+    if not ok:
+
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+        if reason == "RATE_LIMITED":
+
+            await callback.message.answer(
+                "🟡 المنصة حدّت طلبات الوصول للمحتوى."
+            )
+
+        elif reason == "FILE_TOO_LARGE":
+
+            await callback.message.answer(
+                (
+                    "⚠️ الملف أكبر من الحد المسموح "
+                    f"({settings.max_media_size_mb} MB)."
+                )
+            )
+
+        elif reason in {
+            "HTTP 401",
+            "HTTP 403",
+        }:
+
+            await callback.message.answer(
+                (
+                    "⚪ الملف غير متاح للطلب العام "
+                    "من المصدر الحالي."
+                )
+            )
+
+        else:
+
+            await callback.message.answer(
+                (
+                    "⚪ لم أتمكن من جلب الملف العام.\n"
+                    f"Reason: <code>{esc(reason)}</code>"
+                )
+            )
+
+        return
+
+    try:
+
+        caption = (
+            f"🎬 <b>{esc(provider.name)}</b>\n"
+            f"👤 <code>@{esc(session.username)}</code>\n"
+            f"📦 {item.media_type.value}\n\n"
+            "تم جلب المحتوى المتاح للعامة."
+        )
+
+        if item.source_url:
+
+            caption += (
+                "\n\n"
+                + make_link(
+                    "🔗 المصدر",
+                    item.source_url,
+                )
+            )
+
+        if item.media_type == MediaType.VIDEO:
+
+            await callback.message.answer_video(
+                video=FSInputFile(
+                    path
+                ),
+                caption=caption,
+                supports_streaming=True,
+            )
+
+        else:
+
+            await callback.message.answer_photo(
+                photo=FSInputFile(
+                    path
+                ),
+                caption=caption,
+            )
+
+    except Exception as exc:
+
+        logger.exception(
+            "Telegram media send failed."
+        )
+
+        await callback.message.answer(
+            (
+                "❌ فشل إرسال الملف إلى Telegram.\n"
+                f"<code>{esc(exc)}</code>"
+            )
+        )
+
+    finally:
+
+        try:
+
+            if os.path.exists(path):
+
+                os.remove(
+                    path
+                )
+
+        except Exception:
+
+            logger.warning(
+                "Failed to remove temporary file: %s",
+                path,
+            )
 
 
 # ============================================================
@@ -1489,14 +3689,16 @@ async def details_callback(
 ):
 
     if not callback.message:
+
         await callback.answer()
+
         return
 
-    stored = USER_RESULTS.get(
+    session = USER_SESSIONS.get(
         callback.message.chat.id
     )
 
-    if not stored:
+    if not session:
 
         await callback.answer(
             "لا توجد نتيجة محفوظة.",
@@ -1505,15 +3707,11 @@ async def details_callback(
 
         return
 
-    username, results = stored
-
-    text = format_details(
-        username,
-        results,
-    )
-
     await callback.message.edit_text(
-        text,
+        format_details(
+            session.username,
+            session.results,
+        ),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1541,14 +3739,16 @@ async def summary_callback(
 ):
 
     if not callback.message:
+
         await callback.answer()
+
         return
 
-    stored = USER_RESULTS.get(
+    session = USER_SESSIONS.get(
         callback.message.chat.id
     )
 
-    if not stored:
+    if not session:
 
         await callback.answer(
             "لا توجد نتيجة محفوظة.",
@@ -1557,14 +3757,14 @@ async def summary_callback(
 
         return
 
-    username, results = stored
-
     await callback.message.edit_text(
         format_summary(
-            username,
-            results,
+            session.username,
+            session.results,
         ),
-        reply_markup=build_keyboard(),
+        reply_markup=build_summary_keyboard(
+            session.results
+        ),
     )
 
     await callback.answer()
@@ -1582,14 +3782,16 @@ async def recheck_callback(
 ):
 
     if not callback.message:
+
         await callback.answer()
+
         return
 
-    stored = USER_RESULTS.get(
+    session = USER_SESSIONS.get(
         callback.message.chat.id
     )
 
-    if not stored:
+    if not session:
 
         await callback.answer(
             "لا توجد نتيجة لإعادة الفحص.",
@@ -1598,28 +3800,17 @@ async def recheck_callback(
 
         return
 
-    username, _ = stored
+    username = session.username
 
     await callback.answer(
         "🔄 جاري إعادة الفحص..."
     )
 
-    # Delete cached results for this username.
-    for provider in PROVIDERS:
-
-        key = (
-            f"{provider.name.lower()}:"
-            f"{username.lower()}"
-        )
-
-        await cache.delete(
-            key
-        )
-
     started = time.monotonic()
 
     results = await engine.check(
-        username
+        username,
+        force=True,
     )
 
     elapsed = (
@@ -1627,11 +3818,11 @@ async def recheck_callback(
         - started
     )
 
-    USER_RESULTS[
+    USER_SESSIONS[
         callback.message.chat.id
-    ] = (
-        username,
-        results,
+    ] = UserSession(
+        username=username,
+        results=results,
     )
 
     text = format_summary(
@@ -1646,8 +3837,24 @@ async def recheck_callback(
 
     await callback.message.edit_text(
         text,
-        reply_markup=build_keyboard(),
+        reply_markup=build_summary_keyboard(
+            results
+        ),
     )
+
+
+# ============================================================
+# NOOP
+# ============================================================
+
+@dp.callback_query(
+    F.data == "noop"
+)
+async def noop_callback(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
 
 
 # ============================================================
@@ -1665,6 +3872,7 @@ async def health_handler(
         {
             "status": "ok",
             "service": "username-checker",
+            "version": "2.0",
             "time": datetime.now(
                 timezone.utc
             ).isoformat(),
@@ -1714,7 +3922,9 @@ async def webhook_handler(
         )
 
         return web.json_response(
-            {"ok": True}
+            {
+                "ok": True
+            }
         )
 
     except Exception as exc:
@@ -1731,10 +3941,6 @@ async def webhook_handler(
             status=500,
         )
 
-
-# ============================================================
-# WEB APP
-# ============================================================
 
 async def create_web_app():
 
@@ -1824,16 +4030,24 @@ async def main():
     if not settings.bot_token:
 
         raise RuntimeError(
-            "BOT_TOKEN is missing. "
-            "Add it to Render Environment Variables."
+            "BOT_TOKEN is missing."
+        )
+
+    if (
+        settings.bot_token
+        == "YOUR_TOKEN_HERE"
+    ):
+
+        raise RuntimeError(
+            "Replace YOUR_TOKEN_HERE "
+            "with your bot token."
         )
 
     if not settings.render_url:
 
         raise RuntimeError(
             "RENDER_URL is missing. "
-            "Add your Render service URL "
-            "to Environment Variables."
+            "Add your Render service URL."
         )
 
     bot = Bot(
@@ -1842,6 +4056,8 @@ async def main():
             parse_mode=ParseMode.HTML
         ),
     )
+
+    runner: web.AppRunner | None = None
 
     try:
 
@@ -1892,7 +4108,6 @@ async def main():
             "Bot is ONLINE."
         )
 
-        # Keep process alive.
         while True:
 
             await asyncio.sleep(
@@ -1920,6 +4135,18 @@ async def main():
         logger.info(
             "Shutting down..."
         )
+
+        if runner:
+
+            try:
+
+                await runner.cleanup()
+
+            except Exception:
+
+                logger.exception(
+                    "Failed to cleanup HTTP server."
+                )
 
         try:
 
