@@ -4,3 +4,4 @@ pydantic
 pydantic-settings
 beautifulsoup4
 tenacity
+aiohttp
