@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import logging
 import os
 import re
@@ -14,6 +15,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from aiohttp import web
+from bs4 import BeautifulSoup
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -26,14 +29,9 @@ from aiogram.types import (
     Message,
     Update,
 )
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from tenacity import (
-    AsyncRetrying,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 
 # ============================================================
@@ -60,9 +58,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ضع التوكن هنا إذا كنت مصممًا على وضعه داخل الكود.
-    # لا ترفع الملف إلى GitHub وهو يحتوي على توكن حقيقي.
-    bot_token: str = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
+    bot_token: str = Field(
+        default="",
+        alias="BOT_TOKEN",
+    )
 
     render_url: str = Field(
         default="",
@@ -94,6 +93,11 @@ class Settings(BaseSettings):
         alias="CACHE_TTL",
     )
 
+    profile_cache_ttl: int = Field(
+        default=300,
+        alias="PROFILE_CACHE_TTL",
+    )
+
     media_cache_ttl: int = Field(
         default=120,
         alias="MEDIA_CACHE_TTL",
@@ -114,8 +118,23 @@ class Settings(BaseSettings):
         alias="MAX_USERNAME_LENGTH",
     )
 
+    max_sessions: int = Field(
+        default=1000,
+        alias="MAX_SESSIONS",
+    )
+
 
 settings = Settings()
+
+
+# ============================================================
+# DISPATCHER
+# ============================================================
+
+# IMPORTANT:
+# يجب أن يكون Dispatcher معرفًا قبل أي @dp.message
+# أو @dp.callback_query
+dp = Dispatcher()
 
 
 # ============================================================
@@ -131,10 +150,6 @@ class Status(str, Enum):
     UNAVAILABLE = "UNAVAILABLE"
     ERROR = "ERROR"
 
-
-# ============================================================
-# MEDIA TYPES
-# ============================================================
 
 class MediaType(str, Enum):
     VIDEO = "VIDEO"
@@ -158,25 +173,13 @@ class CheckResult:
     platform: str
     username: str
     status: Status
-
     confidence: int = 0
-
     profile_url: str | None = None
-
-    evidence: list[Evidence] = field(
-        default_factory=list
-    )
-
+    evidence: list[Evidence] = field(default_factory=list)
     reason: str | None = None
-
-    data: dict[str, Any] = field(
-        default_factory=dict
-    )
-
+    data: dict[str, Any] = field(default_factory=dict)
     checked_at: datetime = field(
-        default_factory=lambda: datetime.now(
-            timezone.utc
-        )
+        default_factory=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -184,23 +187,16 @@ class CheckResult:
 class PublicProfile:
     platform: str
     username: str
-
     display_name: str | None = None
     bio: str | None = None
-
     avatar_url: str | None = None
-
     followers: int | None = None
     following: int | None = None
     likes: int | None = None
     videos: int | None = None
-
     verified: bool | None = None
-
     website: str | None = None
-
     profile_url: str | None = None
-
     raw_source: str | None = None
 
 
@@ -208,19 +204,12 @@ class PublicProfile:
 class PublicMedia:
     platform: str
     username: str
-
     media_type: MediaType
-
     url: str
-
     thumbnail_url: str | None = None
-
     title: str | None = None
-
     published_at: str | None = None
-
     source_url: str | None = None
-
     downloadable: bool = False
 
 
@@ -233,10 +222,7 @@ USERNAME_RE = re.compile(
 )
 
 
-def normalize_username(
-    username: str,
-) -> str:
-
+def normalize_username(username: str) -> str:
     username = username.strip()
 
     if username.startswith("@"):
@@ -245,28 +231,15 @@ def normalize_username(
     return username.strip()
 
 
-def valid_username(
-    username: str,
-) -> bool:
-
-    return bool(
-        USERNAME_RE.fullmatch(username)
-    )
+def valid_username(username: str) -> bool:
+    return bool(USERNAME_RE.fullmatch(username))
 
 
-def esc(
-    value: Any,
-) -> str:
-
-    return html.escape(
-        str(value)
-    )
+def esc(value: Any) -> str:
+    return html.escape(str(value))
 
 
-def status_icon(
-    status: Status,
-) -> str:
-
+def status_icon(status: Status) -> str:
     return {
         Status.CONFIRMED: "🟢",
         Status.NOT_FOUND: "🔴",
@@ -275,16 +248,10 @@ def status_icon(
         Status.PRIVATE: "🔒",
         Status.UNAVAILABLE: "⚪",
         Status.ERROR: "⚫",
-    }.get(
-        status,
-        "⚪",
-    )
+    }.get(status, "⚪")
 
 
-def status_name(
-    status: Status,
-) -> str:
-
+def status_name(status: Status) -> str:
     return {
         Status.CONFIRMED: "CONFIRMED",
         Status.NOT_FOUND: "NOT FOUND",
@@ -293,72 +260,44 @@ def status_name(
         Status.PRIVATE: "PRIVATE",
         Status.UNAVAILABLE: "UNAVAILABLE",
         Status.ERROR: "ERROR",
-    }.get(
-        status,
-        "UNKNOWN",
-    )
+    }.get(status, "UNKNOWN")
 
 
-def confidence_bar(
-    value: int,
-) -> str:
+def confidence_bar(value: int) -> str:
+    value = max(0, min(100, value))
+    filled = round(value / 10)
 
-    value = max(
-        0,
-        min(100, value),
-    )
-
-    filled = round(
-        value / 10
-    )
-
-    return (
-        "█" * filled
-        + "░" * (10 - filled)
-    )
+    return "█" * filled + "░" * (10 - filled)
 
 
-def safe_profile_url(
-    url: str | None,
-) -> str | None:
-
+def safe_profile_url(url: str | None) -> str | None:
     if not url:
         return None
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
 
-    if parsed.scheme not in {
-        "https",
-        "http",
-    }:
+    if parsed.scheme not in {"https", "http"}:
+        return None
+
+    if not parsed.netloc:
         return None
 
     return url
 
 
-def make_link(
-    text: str,
-    url: str | None,
-) -> str:
-
-    url = safe_profile_url(
-        url
-    )
+def make_link(text: str, url: str | None) -> str:
+    url = safe_profile_url(url)
 
     if not url:
         return esc(text)
 
-    return (
-        f'<a href="{esc(url)}">'
-        f'{esc(text)}'
-        f'</a>'
-    )
+    return f'<a href="{esc(url)}">{esc(text)}</a>'
 
 
-def compact_number(
-    value: Any,
-) -> str:
-
+def compact_number(value: Any) -> str:
     if value is None:
         return "—"
 
@@ -379,6 +318,89 @@ def compact_number(
     return str(number)
 
 
+def normalize_url(
+    value: str | None,
+    base_url: str,
+) -> str | None:
+    if not value:
+        return None
+
+    value = value.strip()
+
+    if not value:
+        return None
+
+    try:
+        result = urljoin(base_url, value)
+        parsed = urlparse(result)
+
+        if parsed.scheme not in {"http", "https"}:
+            return None
+
+        if not parsed.hostname:
+            return None
+
+        return result
+    except Exception:
+        return None
+
+
+# ============================================================
+# MEDIA URL SECURITY
+# ============================================================
+
+def is_safe_media_url(url: str) -> bool:
+    """
+    Basic protection:
+    - HTTPS only
+    - rejects localhost
+    - rejects private/link-local/loopback IP literals
+    - rejects unsupported schemes
+    """
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    if parsed.scheme != "https":
+        return False
+
+    hostname = parsed.hostname
+
+    if not hostname:
+        return False
+
+    hostname = hostname.lower().strip(".")
+
+    blocked_hosts = {
+        "localhost",
+        "localhost.localdomain",
+    }
+
+    if hostname in blocked_hosts:
+        return False
+
+    try:
+        ip = ipaddress.ip_address(hostname)
+
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False
+
+    except ValueError:
+        # Normal hostname.
+        pass
+
+    return True
+
+
 # ============================================================
 # CACHE
 # ============================================================
@@ -391,45 +413,24 @@ class CacheEntry:
 
 class TTLCache:
 
-    def __init__(
-        self,
-        ttl: int,
-    ):
-        self.ttl = ttl
+    def __init__(self, ttl: int):
+        self.ttl = max(1, ttl)
 
-        self._cache: dict[
-            str,
-            CacheEntry,
-        ] = {}
+        self._cache: dict[str, CacheEntry] = {}
 
         self._lock = asyncio.Lock()
 
-    async def get(
-        self,
-        key: str,
-    ) -> Any | None:
-
+    async def get(self, key: str) -> Any | None:
         async with self._lock:
-
-            entry = self._cache.get(
-                key
-            )
+            entry = self._cache.get(key)
 
             if entry is None:
                 return None
 
-            age = (
-                time.monotonic()
-                - entry.created_at
-            )
+            age = time.monotonic() - entry.created_at
 
             if age > self.ttl:
-
-                self._cache.pop(
-                    key,
-                    None,
-                )
-
+                self._cache.pop(key, None)
                 return None
 
             return entry.value
@@ -439,29 +440,27 @@ class TTLCache:
         key: str,
         value: Any,
     ) -> None:
-
         async with self._lock:
-
             self._cache[key] = CacheEntry(
                 created_at=time.monotonic(),
                 value=value,
             )
 
-    async def delete(
-        self,
-        key: str,
-    ) -> None:
-
+    async def delete(self, key: str) -> None:
         async with self._lock:
+            self._cache.pop(key, None)
 
-            self._cache.pop(
-                key,
-                None,
-            )
+    async def clear(self) -> None:
+        async with self._lock:
+            self._cache.clear()
 
 
 result_cache = TTLCache(
     settings.cache_ttl
+)
+
+profile_cache = TTLCache(
+    settings.profile_cache_ttl
 )
 
 media_cache = TTLCache(
@@ -470,22 +469,25 @@ media_cache = TTLCache(
 
 
 # ============================================================
-# HTTP
+# HTTP CLIENT
 # ============================================================
 
-class RetryableHTTPError(
-    Exception
-):
-    pass
-
-
 class HTTPClient:
+
+    RETRY_STATUS_CODES = {
+        408,
+        425,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }
 
     def __init__(
         self,
         timeout: float,
     ):
-
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 timeout
@@ -495,14 +497,17 @@ class HTTPClient:
                 "User-Agent": (
                     "Mozilla/5.0 "
                     "(compatible; "
-                    "UsernameChecker/2.0)"
+                    "UsernameChecker/3.0)"
                 ),
                 "Accept": "*/*",
             },
+            limits=httpx.Limits(
+                max_connections=30,
+                max_keepalive_connections=10,
+            ),
         )
 
-    async def close(self):
-
+    async def close(self) -> None:
         await self.client.aclose()
 
     async def get(
@@ -511,73 +516,56 @@ class HTTPClient:
         *,
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
+        attempts: int = 3,
     ) -> httpx.Response | None:
 
-        async def request():
+        last_response: httpx.Response | None = None
+
+        for attempt in range(1, attempts + 1):
 
             try:
-
-                response = (
-                    await self.client.get(
-                        url,
-                        headers=headers,
-                        params=params,
-                    )
+                response = await self.client.get(
+                    url,
+                    headers=headers,
+                    params=params,
                 )
 
-                if response.status_code in {
-                    408,
-                    425,
-                    429,
-                    500,
-                    502,
-                    503,
-                    504,
-                }:
+                last_response = response
 
-                    raise RetryableHTTPError(
-                        f"HTTP {response.status_code}"
-                    )
+                if (
+                    response.status_code
+                    not in self.RETRY_STATUS_CODES
+                ):
+                    return response
 
-                return response
+                logger.warning(
+                    "Retryable HTTP %s | attempt=%s | %s",
+                    response.status_code,
+                    attempt,
+                    url,
+                )
 
             except (
                 httpx.TimeoutException,
                 httpx.NetworkError,
             ) as exc:
 
-                raise RetryableHTTPError(
-                    str(exc)
-                ) from exc
+                logger.warning(
+                    "HTTP network error | attempt=%s | %s | %s",
+                    attempt,
+                    url,
+                    exc,
+                )
 
-        try:
+            if attempt < attempts:
+                await asyncio.sleep(
+                    min(2 ** (attempt - 1), 8)
+                )
 
-            async for attempt in AsyncRetrying(
-                retry=retry_if_exception_type(
-                    RetryableHTTPError
-                ),
-                wait=wait_exponential(
-                    multiplier=1,
-                    min=1,
-                    max=8,
-                ),
-                stop=stop_after_attempt(3),
-                reraise=True,
-            ):
-
-                with attempt:
-
-                    return await request()
-
-        except Exception as exc:
-
-            logger.warning(
-                "HTTP request failed: %s | %s",
-                url,
-                exc,
-            )
-
-            return None
+        # مهم:
+        # نعيد آخر response حتى نستطيع معرفة 429
+        # أو 503 بدل تحويله إلى UNKNOWN.
+        return last_response
 
     async def stream_to_file(
         self,
@@ -586,8 +574,10 @@ class HTTPClient:
         max_bytes: int,
     ) -> tuple[bool, str]:
 
-        try:
+        if not is_safe_media_url(url):
+            return False, "UNSAFE_URL"
 
+        try:
             timeout = httpx.Timeout(
                 settings.media_timeout
             )
@@ -599,36 +589,60 @@ class HTTPClient:
                 headers={
                     "Accept": (
                         "video/*,"
-                        "image/*,"
-                        "*/*"
+                        "image/*"
                     ),
                 },
             ) as response:
 
-                if response.status_code in {
-                    401,
-                    403,
-                    404,
-                }:
+                status = response.status_code
 
-                    return (
-                        False,
-                        f"HTTP {response.status_code}",
+                if status == 401:
+                    return False, "HTTP 401"
+
+                if status == 403:
+                    return False, "HTTP 403"
+
+                if status == 404:
+                    return False, "HTTP 404"
+
+                if status == 429:
+                    return False, "RATE_LIMITED"
+
+                if status >= 500:
+                    return False, f"HTTP {status}"
+
+                if status >= 400:
+                    return False, f"HTTP {status}"
+
+                content_type = (
+                    response.headers
+                    .get("content-type", "")
+                    .lower()
+                )
+
+                # لا نحفظ HTML على أنه صورة/فيديو.
+                if (
+                    "text/html" in content_type
+                    or "application/xhtml" in content_type
+                ):
+                    return False, "NOT_DIRECT_MEDIA"
+
+                if (
+                    "mpegurl" in content_type
+                    or "x-mpegurl" in content_type
+                ):
+                    return False, "STREAM_MANIFEST"
+
+                allowed_type = (
+                    content_type.startswith("video/")
+                    or content_type.startswith("image/")
+                    or content_type.startswith(
+                        "application/octet-stream"
                     )
+                )
 
-                if response.status_code == 429:
-
-                    return (
-                        False,
-                        "RATE_LIMITED",
-                    )
-
-                if response.status_code >= 400:
-
-                    return (
-                        False,
-                        f"HTTP {response.status_code}",
-                    )
+                if not allowed_type:
+                    return False, "UNSUPPORTED_CONTENT_TYPE"
 
                 content_length = response.headers.get(
                     "content-length"
@@ -637,75 +651,49 @@ class HTTPClient:
                 if content_length:
 
                     try:
-
-                        if int(
-                            content_length
-                        ) > max_bytes:
-
-                            return (
-                                False,
-                                "FILE_TOO_LARGE",
-                            )
-
+                        if (
+                            int(content_length)
+                            > max_bytes
+                        ):
+                            return False, "FILE_TOO_LARGE"
                     except ValueError:
                         pass
 
                 total = 0
 
-                with open(
-                    path,
-                    "wb",
-                ) as file:
+                with open(path, "wb") as file:
 
                     async for chunk in response.aiter_bytes(
-                        1024 * 64
+                        64 * 1024
                     ):
+                        if not chunk:
+                            continue
 
                         total += len(chunk)
 
                         if total > max_bytes:
-
-                            return (
-                                False,
-                                "FILE_TOO_LARGE",
-                            )
+                            return False, "FILE_TOO_LARGE"
 
                         file.write(chunk)
 
-                return (
-                    True,
-                    "OK",
-                )
+                if total <= 0:
+                    return False, "EMPTY_FILE"
 
-        except (
-            httpx.TimeoutException,
-        ):
+                return True, "OK"
 
-            return (
-                False,
-                "TIMEOUT",
-            )
+        except httpx.TimeoutException:
+            return False, "TIMEOUT"
 
-        except (
-            httpx.NetworkError,
-        ):
-
-            return (
-                False,
-                "NETWORK_ERROR",
-            )
+        except httpx.NetworkError:
+            return False, "NETWORK_ERROR"
 
         except Exception as exc:
-
             logger.exception(
                 "Media download failed: %s",
                 url,
             )
 
-            return (
-                False,
-                str(exc),
-            )
+            return False, str(exc)
 
 
 http_client = HTTPClient(
@@ -732,7 +720,6 @@ class Provider:
         username: str,
         http: HTTPClient,
     ) -> CheckResult:
-
         raise NotImplementedError
 
     async def profile(
@@ -740,7 +727,6 @@ class Provider:
         username: str,
         http: HTTPClient,
     ) -> PublicProfile | None:
-
         return None
 
     async def media(
@@ -748,7 +734,6 @@ class Provider:
         username: str,
         http: HTTPClient,
     ) -> list[PublicMedia]:
-
         return []
 
     def result(
@@ -767,7 +752,10 @@ class Provider:
             platform=self.name,
             username=username,
             status=status,
-            confidence=confidence,
+            confidence=max(
+                0,
+                min(100, confidence),
+            ),
             profile_url=profile_url,
             evidence=evidence or [],
             reason=reason,
@@ -776,11 +764,11 @@ class Provider:
 
 
 # ============================================================
-# HTML PARSING
+# HTML HELPERS
 # ============================================================
 
 def meta_content(
-    soup,
+    soup: BeautifulSoup,
     *,
     name: str | None = None,
     prop: str | None = None,
@@ -789,29 +777,21 @@ def meta_content(
     tag = None
 
     if name:
-
         tag = soup.find(
             "meta",
-            attrs={
-                "name": name,
-            },
+            attrs={"name": name},
         )
 
     if tag is None and prop:
-
         tag = soup.find(
             "meta",
-            attrs={
-                "property": prop,
-            },
+            attrs={"property": prop},
         )
 
     if tag is None:
         return None
 
-    value = tag.get(
-        "content"
-    )
+    value = tag.get("content")
 
     if not value:
         return None
@@ -842,9 +822,9 @@ def extract_json_number(
             if not match:
                 continue
 
-            raw = (
-                match.group(1)
-                .replace(",", "")
+            raw = match.group(1).replace(
+                ",",
+                "",
             )
 
             try:
@@ -874,7 +854,6 @@ def extract_boolean(
         )
 
         if match:
-
             return (
                 match.group(1).lower()
                 == "true"
@@ -903,36 +882,75 @@ def extract_json_string(
 
         if match:
 
-            value = (
-                match.group(1)
-                .replace(
-                    '\\"',
-                    '"',
-                )
+            value = match.group(1).replace(
+                '\\"',
+                '"',
             )
 
             if value.strip():
-
                 return value.strip()
 
     return None
+
+
+def username_appears_in_metadata(
+    username: str,
+    values: list[str | None],
+) -> bool:
+
+    target = username.casefold()
+
+    for value in values:
+
+        if not value:
+            continue
+
+        normalized = re.sub(
+            r"[^a-z0-9._-]+",
+            " ",
+            value.casefold(),
+        )
+
+        tokens = normalized.split()
+
+        if target in tokens:
+            return True
+
+        if (
+            f"@{target}"
+            in value.casefold()
+        ):
+            return True
+
+    return False
 
 
 def extract_media_from_html(
     platform: str,
     username: str,
     page_url: str,
-    text: str,
-    soup,
+    soup: BeautifulSoup,
 ) -> list[PublicMedia]:
 
     items: list[PublicMedia] = []
 
-    video_urls: list[str] = []
+    seen: set[str] = set()
+
+    og_image = meta_content(
+        soup,
+        prop="og:image",
+    )
+
+    og_title = meta_content(
+        soup,
+        prop="og:title",
+    )
 
     # --------------------------------------------------------
-    # OpenGraph video
+    # Videos
     # --------------------------------------------------------
+
+    video_urls: list[str] = []
 
     for prop in (
         "og:video",
@@ -945,64 +963,52 @@ def extract_media_from_html(
             prop=prop,
         )
 
-        if value:
-            video_urls.append(
-                urljoin(
-                    page_url,
-                    value,
-                )
-            )
-
-    # --------------------------------------------------------
-    # HTML <video>
-    # --------------------------------------------------------
-
-    for video in soup.find_all(
-        "video"
-    ):
-
-        src = video.get(
-            "src"
+        normalized = normalize_url(
+            value,
+            page_url,
         )
 
-        if src:
-
+        if normalized:
             video_urls.append(
-                urljoin(
-                    page_url,
-                    src,
-                )
+                normalized
             )
 
-        for source in video.find_all(
-            "source"
-        ):
+    for video in soup.find_all("video"):
 
-            src = source.get(
-                "src"
+        src = video.get("src")
+
+        normalized = normalize_url(
+            src,
+            page_url,
+        )
+
+        if normalized:
+            video_urls.append(
+                normalized
             )
 
-            if src:
+        for source in video.find_all("source"):
 
+            src = source.get("src")
+
+            normalized = normalize_url(
+                src,
+                page_url,
+            )
+
+            if normalized:
                 video_urls.append(
-                    urljoin(
-                        page_url,
-                        src,
-                    )
+                    normalized
                 )
-
-    # --------------------------------------------------------
-    # Deduplicate
-    # --------------------------------------------------------
-
-    seen: set[str] = set()
 
     for video_url in video_urls:
 
         if video_url in seen:
             continue
 
-        seen.add(
+        seen.add(video_url)
+
+        downloadable = is_safe_media_url(
             video_url
         )
 
@@ -1012,107 +1018,100 @@ def extract_media_from_html(
                 username=username,
                 media_type=MediaType.VIDEO,
                 url=video_url,
-                thumbnail_url=meta_content(
-                    soup,
-                    prop="og:image",
+                thumbnail_url=normalize_url(
+                    og_image,
+                    page_url,
                 ),
-                title=meta_content(
-                    soup,
-                    prop="og:title",
-                ),
+                title=og_title,
                 source_url=page_url,
-                downloadable=True,
+                downloadable=downloadable,
             )
         )
+
+        if len(items) >= settings.max_media_items:
+            return items
 
     # --------------------------------------------------------
     # OpenGraph image
     # --------------------------------------------------------
 
-    image_url = meta_content(
-        soup,
-        prop="og:image",
+    normalized_image = normalize_url(
+        og_image,
+        page_url,
     )
 
-    if image_url:
+    if (
+        normalized_image
+        and normalized_image not in seen
+    ):
+
+        seen.add(normalized_image)
 
         items.append(
             PublicMedia(
                 platform=platform,
                 username=username,
                 media_type=MediaType.IMAGE,
-                url=urljoin(
-                    page_url,
-                    image_url,
-                ),
-                thumbnail_url=urljoin(
-                    page_url,
-                    image_url,
-                ),
-                title=meta_content(
-                    soup,
-                    prop="og:title",
-                ),
+                url=normalized_image,
+                thumbnail_url=normalized_image,
+                title=og_title,
                 source_url=page_url,
-                downloadable=True,
+                downloadable=is_safe_media_url(
+                    normalized_image
+                ),
             )
         )
 
     # --------------------------------------------------------
-    # HTML images
+    # Images
     # --------------------------------------------------------
 
-    for image in soup.find_all(
-        "img"
-    )[:20]:
+    for image in soup.find_all("img"):
+
+        if len(items) >= settings.max_media_items:
+            break
 
         src = (
             image.get("src")
             or image.get("data-src")
+            or image.get("data-lazy-src")
         )
 
-        if not src:
-            continue
-
-        full_url = urljoin(
-            page_url,
+        normalized = normalize_url(
             src,
+            page_url,
         )
 
-        if full_url in seen:
+        if not normalized:
             continue
 
-        seen.add(
-            full_url
-        )
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
 
         items.append(
             PublicMedia(
                 platform=platform,
                 username=username,
                 media_type=MediaType.IMAGE,
-                url=full_url,
-                title=(
-                    image.get("alt")
-                    or None
-                ),
+                url=normalized,
+                title=image.get("alt") or None,
                 source_url=page_url,
-                downloadable=True,
+                downloadable=is_safe_media_url(
+                    normalized
+                ),
             )
         )
 
-    return items[
-        :settings.max_media_items
-    ]
+    return items[:settings.max_media_items]
 
 
 # ============================================================
 # GITHUB
 # ============================================================
 
-class GitHubProvider(
-    Provider
-):
+class GitHubProvider(Provider):
 
     name = "GitHub"
 
@@ -1142,18 +1141,13 @@ class GitHubProvider(
         )
 
         if response is None:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
-                reason=(
-                    "GitHub API request failed "
-                    "or timed out."
-                ),
+                reason="GitHub request failed.",
             )
 
         if response.status_code == 404:
-
             return self.result(
                 username,
                 Status.NOT_FOUND,
@@ -1166,11 +1160,7 @@ class GitHubProvider(
                 ],
             )
 
-        if response.status_code in {
-            403,
-            429,
-        }:
-
+        if response.status_code in {403, 429}:
             return self.result(
                 username,
                 Status.RATE_LIMITED,
@@ -1181,22 +1171,18 @@ class GitHubProvider(
             )
 
         if response.status_code != 200:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
                 reason=(
-                    "GitHub returned HTTP "
+                    f"GitHub returned HTTP "
                     f"{response.status_code}."
                 ),
             )
 
         try:
-
             data = response.json()
-
         except Exception:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
@@ -1204,70 +1190,42 @@ class GitHubProvider(
             )
 
         login = str(
-            data.get(
-                "login",
-                "",
-            )
+            data.get("login", "")
         )
 
-        if login.lower() != username.lower():
-
+        if login.casefold() != username.casefold():
             return self.result(
                 username,
                 Status.UNKNOWN,
-                reason=(
-                    "GitHub username mismatch."
-                ),
+                reason="GitHub username mismatch.",
             )
 
         return self.result(
             username,
             Status.CONFIRMED,
             confidence=100,
-            profile_url=data.get(
-                "html_url"
-            ),
+            profile_url=data.get("html_url"),
             evidence=[
                 Evidence(
-                    "Official GitHub API confirmed account.",
+                    "Official GitHub API confirmed the account.",
                     70,
                 ),
                 Evidence(
-                    "Returned login matches username.",
+                    "Returned login matches the requested username.",
                     30,
                 ),
             ],
             data={
-                "name": data.get(
-                    "name"
-                ),
-                "bio": data.get(
-                    "bio"
-                ),
-                "company": data.get(
-                    "company"
-                ),
-                "location": data.get(
-                    "location"
-                ),
-                "public_repos": data.get(
-                    "public_repos"
-                ),
-                "followers": data.get(
-                    "followers"
-                ),
-                "following": data.get(
-                    "following"
-                ),
-                "public_gists": data.get(
-                    "public_gists"
-                ),
-                "created_at": data.get(
-                    "created_at"
-                ),
-                "updated_at": data.get(
-                    "updated_at"
-                ),
+                "name": data.get("name"),
+                "bio": data.get("bio"),
+                "company": data.get("company"),
+                "location": data.get("location"),
+                "public_repos": data.get("public_repos"),
+                "followers": data.get("followers"),
+                "following": data.get("following"),
+                "public_gists": data.get("public_gists"),
+                "created_at": data.get("created_at"),
+                "updated_at": data.get("updated_at"),
             },
         )
 
@@ -1290,19 +1248,10 @@ class GitHubProvider(
         return PublicProfile(
             platform=self.name,
             username=username,
-            display_name=data.get(
-                "name"
-            ),
-            bio=data.get(
-                "bio"
-            ),
-            followers=data.get(
-                "followers"
-            ),
-            following=data.get(
-                "following"
-            ),
-            website=None,
+            display_name=data.get("name"),
+            bio=data.get("bio"),
+            followers=data.get("followers"),
+            following=data.get("following"),
             profile_url=result.profile_url,
         )
 
@@ -1311,9 +1260,7 @@ class GitHubProvider(
 # REDDIT
 # ============================================================
 
-class RedditProvider(
-    Provider
-):
+class RedditProvider(Provider):
 
     name = "Reddit"
 
@@ -1336,22 +1283,18 @@ class RedditProvider(
             url,
             headers={
                 "User-Agent":
-                    "UsernameChecker/2.0",
+                    "UsernameChecker/3.0",
             },
         )
 
         if response is None:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
-                reason=(
-                    "Reddit request failed."
-                ),
+                reason="Reddit request failed.",
             )
 
         if response.status_code == 404:
-
             return self.result(
                 username,
                 Status.NOT_FOUND,
@@ -1364,11 +1307,7 @@ class RedditProvider(
                 ],
             )
 
-        if response.status_code in {
-            403,
-            429,
-        }:
-
+        if response.status_code in {403, 429}:
             return self.result(
                 username,
                 Status.RATE_LIMITED,
@@ -1379,27 +1318,19 @@ class RedditProvider(
             )
 
         if response.status_code != 200:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
                 reason=(
-                    f"Reddit returned "
-                    f"HTTP {response.status_code}."
+                    f"Reddit returned HTTP "
+                    f"{response.status_code}."
                 ),
             )
 
         try:
-
             payload = response.json()
-
-            data = (
-                payload.get("data")
-                or {}
-            )
-
+            data = payload.get("data") or {}
         except Exception:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
@@ -1407,51 +1338,41 @@ class RedditProvider(
             )
 
         account_name = str(
-            data.get(
-                "name",
-                "",
-            )
+            data.get("name", "")
         )
 
         if (
-            account_name.lower()
-            != username.lower()
+            account_name.casefold()
+            != username.casefold()
         ):
-
             return self.result(
                 username,
                 Status.UNKNOWN,
                 reason="Reddit username mismatch.",
             )
 
+        profile_url = (
+            f"https://www.reddit.com/"
+            f"user/{account_name}/"
+        )
+
         return self.result(
             username,
             Status.CONFIRMED,
             confidence=100,
-            profile_url=(
-                f"https://www.reddit.com/"
-                f"user/{username}/"
-            ),
+            profile_url=profile_url,
             evidence=[
                 Evidence(
-                    "Reddit returned a matching user.",
+                    "Reddit returned a matching public user.",
                     100,
                 )
             ],
             data={
                 "name": account_name,
-                "created_utc": data.get(
-                    "created_utc"
-                ),
-                "link_karma": data.get(
-                    "link_karma"
-                ),
-                "comment_karma": data.get(
-                    "comment_karma"
-                ),
-                "is_gold": data.get(
-                    "is_gold"
-                ),
+                "created_utc": data.get("created_utc"),
+                "link_karma": data.get("link_karma"),
+                "comment_karma": data.get("comment_karma"),
+                "is_gold": data.get("is_gold"),
             },
         )
 
@@ -1472,11 +1393,7 @@ class RedditProvider(
         return PublicProfile(
             platform=self.name,
             username=username,
-            display_name=result.data.get(
-                "name"
-            ),
-            followers=None,
-            following=None,
+            display_name=result.data.get("name"),
             profile_url=result.profile_url,
         )
 
@@ -1485,9 +1402,7 @@ class RedditProvider(
 # GENERIC HTML PROVIDER
 # ============================================================
 
-class HTMLProvider(
-    Provider
-):
+class HTMLProvider(Provider):
 
     PROFILE_TEMPLATE = ""
 
@@ -1499,30 +1414,94 @@ class HTMLProvider(
         self,
         username: str,
         http: HTTPClient,
-    ) -> tuple[
-        str,
-        httpx.Response | None,
-    ]:
+    ) -> tuple[str, httpx.Response | None]:
 
         url = self.PROFILE_TEMPLATE.format(
             username=username
         )
 
-        response = await http.get(
-            url
-        )
+        response = await http.get(url)
 
-        if response is None:
+        return url, response
 
-            return (
-                url,
-                None,
+    def metadata_confidence(
+        self,
+        username: str,
+        title: str | None,
+        og_title: str | None,
+        description: str | None,
+        text: str,
+    ) -> tuple[int, list[Evidence]]:
+
+        evidence: list[Evidence] = []
+
+        score = 0
+
+        values = [
+            title,
+            og_title,
+            description,
+        ]
+
+        if username_appears_in_metadata(
+            username,
+            values,
+        ):
+            score += 60
+
+            evidence.append(
+                Evidence(
+                    "Requested username appears in public page metadata.",
+                    60,
+                )
             )
 
-        return (
-            url,
-            response,
+        if og_title:
+            score += 10
+
+            evidence.append(
+                Evidence(
+                    "OpenGraph title is present.",
+                    10,
+                )
+            )
+
+        if description:
+            score += 5
+
+            evidence.append(
+                Evidence(
+                    "Public description metadata is present.",
+                    5,
+                )
+            )
+
+        # Search for common profile indicators.
+        indicators = (
+            "followers",
+            "following",
+            "profile",
+            "username",
+            "verified",
         )
+
+        indicator_hits = sum(
+            1
+            for item in indicators
+            if item in text.lower()
+        )
+
+        if indicator_hits >= 2:
+            score += 15
+
+            evidence.append(
+                Evidence(
+                    "Page contains multiple profile-related indicators.",
+                    15,
+                )
+            )
+
+        return min(score, 100), evidence
 
     async def check(
         self,
@@ -1536,19 +1515,14 @@ class HTMLProvider(
         )
 
         if response is None:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
                 profile_url=url,
-                reason=(
-                    "Request failed, timed out, "
-                    "or was unavailable."
-                ),
+                reason="Request failed or timed out.",
             )
 
         if response.status_code == 404:
-
             return self.result(
                 username,
                 Status.NOT_FOUND,
@@ -1562,57 +1536,62 @@ class HTMLProvider(
                 ],
             )
 
-        if response.status_code in {
-            401,
-            403,
-            429,
-        }:
-
-            if response.status_code == 429:
-
-                status = Status.RATE_LIMITED
-
-            else:
-
-                status = Status.UNKNOWN
-
+        if response.status_code == 429:
             return self.result(
                 username,
-                status,
+                Status.RATE_LIMITED,
+                profile_url=url,
+                reason="Platform rate limited the request.",
+            )
+
+        if response.status_code in {401, 403}:
+            return self.result(
+                username,
+                Status.UNKNOWN,
                 profile_url=url,
                 reason=(
-                    f"Platform returned "
-                    f"HTTP {response.status_code}."
+                    f"Platform returned HTTP "
+                    f"{response.status_code}."
                 ),
             )
 
         if response.status_code >= 500:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
                 profile_url=url,
                 reason=(
-                    f"Platform server returned "
-                    f"HTTP {response.status_code}."
+                    f"Platform server returned HTTP "
+                    f"{response.status_code}."
                 ),
             )
 
         if response.status_code != 200:
-
             return self.result(
                 username,
                 Status.UNKNOWN,
                 profile_url=url,
                 reason=(
-                    f"Platform returned "
-                    f"HTTP {response.status_code}."
+                    f"Platform returned HTTP "
+                    f"{response.status_code}."
                 ),
             )
 
         text = response.text
 
+        if not text:
+            return self.result(
+                username,
+                Status.UNKNOWN,
+                profile_url=url,
+                reason="Empty response.",
+            )
+
         lower_text = text.lower()
+
+        # ----------------------------------------------------
+        # Not found markers
+        # ----------------------------------------------------
 
         for marker in self.NOT_FOUND_MARKERS:
 
@@ -1621,18 +1600,19 @@ class HTMLProvider(
                 return self.result(
                     username,
                     Status.NOT_FOUND,
-                    confidence=80,
+                    confidence=85,
                     profile_url=url,
                     evidence=[
                         Evidence(
-                            (
-                                "Page contained "
-                                f"not-found marker: {marker}"
-                            ),
-                            80,
+                            f"Page contained not-found marker: {marker}",
+                            85,
                         )
                     ],
                 )
+
+        # ----------------------------------------------------
+        # Private markers
+        # ----------------------------------------------------
 
         for marker in self.PRIVATE_MARKERS:
 
@@ -1641,50 +1621,19 @@ class HTMLProvider(
                 return self.result(
                     username,
                     Status.PRIVATE,
-                    confidence=80,
+                    confidence=85,
                     profile_url=url,
                     evidence=[
                         Evidence(
-                            (
-                                "Page indicated "
-                                f"restricted/private content: {marker}"
-                            ),
-                            80,
+                            f"Page indicated private/restricted content: {marker}",
+                            85,
                         )
                     ],
                 )
 
-        try:
-
-            from bs4 import BeautifulSoup
-
-            soup = BeautifulSoup(
-                text,
-                "html.parser",
-            )
-
-        except Exception:
-
-            return self.result(
-                username,
-                Status.UNKNOWN,
-                profile_url=url,
-                reason="HTML parsing failed.",
-            )
-
-        og_title = meta_content(
-            soup,
-            prop="og:title",
-        )
-
-        og_description = meta_content(
-            soup,
-            prop="og:description",
-        )
-
-        og_image = meta_content(
-            soup,
-            prop="og:image",
+        soup = BeautifulSoup(
+            text,
+            "html.parser",
         )
 
         title = (
@@ -1694,38 +1643,44 @@ class HTMLProvider(
             else None
         )
 
-        # A page with strong profile metadata
-        # is better evidence than HTTP 200 alone.
-        strong_evidence = any(
-            [
-                og_title,
-                og_description,
-                og_image,
-                title,
-            ]
+        og_title = meta_content(
+            soup,
+            prop="og:title",
         )
 
-        if strong_evidence:
+        description = meta_content(
+            soup,
+            prop="og:description",
+        )
+
+        og_image = meta_content(
+            soup,
+            prop="og:image",
+        )
+
+        confidence, evidence = (
+            self.metadata_confidence(
+                username,
+                title,
+                og_title,
+                description,
+                text,
+            )
+        )
+
+        # Do not confirm simply because HTTP 200 exists.
+        if confidence >= 70:
 
             return self.result(
                 username,
                 Status.CONFIRMED,
-                confidence=75,
+                confidence=confidence,
                 profile_url=url,
-                evidence=[
-                    Evidence(
-                        "Public profile page returned usable metadata.",
-                        50,
-                    ),
-                    Evidence(
-                        "Profile page contains OpenGraph/title metadata.",
-                        25,
-                    ),
-                ],
+                evidence=evidence,
                 data={
                     "title": title,
                     "og_title": og_title,
-                    "og_description": og_description,
+                    "og_description": description,
                     "og_image": og_image,
                 },
             )
@@ -1733,11 +1688,12 @@ class HTMLProvider(
         return self.result(
             username,
             Status.UNKNOWN,
+            confidence=confidence,
             profile_url=url,
+            evidence=evidence,
             reason=(
-                "Page loaded, but there was "
-                "not enough evidence to confirm "
-                "the account."
+                "Page loaded, but there was not enough "
+                "evidence to confirm the requested account."
             ),
         )
 
@@ -1757,8 +1713,6 @@ class HTMLProvider(
 
         if response.status_code != 200:
             return None
-
-        from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(
             response.text,
@@ -1835,8 +1789,7 @@ class HTMLProvider(
         )
 
         display_name = (
-            title
-            or extract_json_string(
+            extract_json_string(
                 text,
                 [
                     "nickname",
@@ -1844,6 +1797,7 @@ class HTMLProvider(
                     "name",
                 ],
             )
+            or title
         )
 
         return PublicProfile(
@@ -1851,13 +1805,9 @@ class HTMLProvider(
             username=username,
             display_name=display_name,
             bio=description,
-            avatar_url=(
-                urljoin(
-                    url,
-                    image,
-                )
-                if image
-                else None
+            avatar_url=normalize_url(
+                image,
+                url,
             ),
             followers=followers,
             following=following,
@@ -1866,7 +1816,6 @@ class HTMLProvider(
             verified=verified,
             website=website,
             profile_url=url,
-            raw_source=response.text,
         )
 
     async def media(
@@ -1886,8 +1835,6 @@ class HTMLProvider(
         if response.status_code != 200:
             return []
 
-        from bs4 import BeautifulSoup
-
         soup = BeautifulSoup(
             response.text,
             "html.parser",
@@ -1897,7 +1844,6 @@ class HTMLProvider(
             self.name,
             username,
             url,
-            response.text,
             soup,
         )
 
@@ -1906,9 +1852,7 @@ class HTMLProvider(
 # INSTAGRAM
 # ============================================================
 
-class InstagramProvider(
-    HTMLProvider
-):
+class InstagramProvider(HTMLProvider):
 
     name = "Instagram"
 
@@ -1932,9 +1876,7 @@ class InstagramProvider(
 # TIKTOK
 # ============================================================
 
-class TikTokProvider(
-    HTMLProvider
-):
+class TikTokProvider(HTMLProvider):
 
     name = "TikTok"
 
@@ -1959,9 +1901,7 @@ class TikTokProvider(
 # SNAPCHAT
 # ============================================================
 
-class SnapchatProvider(
-    HTMLProvider
-):
+class SnapchatProvider(HTMLProvider):
 
     name = "Snapchat"
 
@@ -1975,18 +1915,16 @@ class SnapchatProvider(
         "doesn't exist",
     )
 
-    PRIVATE_MARKERS = (
-        "private",
-    )
+    # لا نستخدم marker عام مثل "private"
+    # لأنه يسبب false positives.
+    PRIVATE_MARKERS = ()
 
 
 # ============================================================
 # X
 # ============================================================
 
-class XProvider(
-    HTMLProvider
-):
+class XProvider(HTMLProvider):
 
     name = "X"
 
@@ -1996,7 +1934,7 @@ class XProvider(
 
     NOT_FOUND_MARKERS = (
         "this account doesn't exist",
-        "account suspended",
+        "this account does not exist",
     )
 
 
@@ -2004,9 +1942,7 @@ class XProvider(
 # PINTEREST
 # ============================================================
 
-class PinterestProvider(
-    HTMLProvider
-):
+class PinterestProvider(HTMLProvider):
 
     name = "Pinterest"
 
@@ -2024,9 +1960,7 @@ class PinterestProvider(
 # TWITCH
 # ============================================================
 
-class TwitchProvider(
-    HTMLProvider
-):
+class TwitchProvider(HTMLProvider):
 
     name = "Twitch"
 
@@ -2055,11 +1989,7 @@ PROVIDERS: list[Provider] = [
     TwitchProvider(),
 ]
 
-
-PROVIDER_MAP: dict[
-    str,
-    Provider,
-] = {
+PROVIDER_MAP: dict[str, Provider] = {
     provider.name.lower(): provider
     for provider in PROVIDERS
 }
@@ -2076,11 +2006,10 @@ class CheckEngine:
         http: HTTPClient,
         max_concurrency: int,
     ):
-
         self.http = http
 
         self.semaphore = asyncio.Semaphore(
-            max_concurrency
+            max(1, max_concurrency)
         )
 
     async def run_provider(
@@ -2103,8 +2032,7 @@ class CheckEngine:
                 cache_key
             )
 
-            if cached:
-
+            if cached is not None:
                 return cached
 
         async with self.semaphore:
@@ -2117,13 +2045,12 @@ class CheckEngine:
                 )
 
             except asyncio.CancelledError:
-
                 raise
 
             except Exception as exc:
 
                 logger.exception(
-                    "Provider failed: %s",
+                    "Provider check failed: %s",
                     provider.name,
                 )
 
@@ -2133,6 +2060,7 @@ class CheckEngine:
                     reason=str(exc),
                 )
 
+        # Cache only stable results.
         if result.status in {
             Status.CONFIRMED,
             Status.NOT_FOUND,
@@ -2162,9 +2090,12 @@ class CheckEngine:
             for provider in PROVIDERS
         ]
 
-        return await asyncio.gather(
-            *tasks
+        results = await asyncio.gather(
+            *tasks,
+            return_exceptions=False,
         )
+
+        return results
 
     async def get_profile(
         self,
@@ -2182,12 +2113,11 @@ class CheckEngine:
 
         if not force:
 
-            cached = await media_cache.get(
+            cached = await profile_cache.get(
                 key
             )
 
             if cached is not None:
-
                 return cached
 
         async with self.semaphore:
@@ -2199,6 +2129,9 @@ class CheckEngine:
                     self.http,
                 )
 
+            except asyncio.CancelledError:
+                raise
+
             except Exception:
 
                 logger.exception(
@@ -2208,9 +2141,9 @@ class CheckEngine:
 
                 profile = None
 
-        if profile:
+        if profile is not None:
 
-            await media_cache.set(
+            await profile_cache.set(
                 key,
                 profile,
             )
@@ -2238,7 +2171,6 @@ class CheckEngine:
             )
 
             if cached is not None:
-
                 return cached
 
         async with self.semaphore:
@@ -2249,6 +2181,9 @@ class CheckEngine:
                     username,
                     self.http,
                 )
+
+            except asyncio.CancelledError:
+                raise
 
             except Exception:
 
@@ -2281,20 +2216,41 @@ engine = CheckEngine(
 class UserSession:
     username: str
     results: list[CheckResult]
-
     selected_platform: str | None = None
-
     media: list[PublicMedia] = field(
         default_factory=list
     )
-
     media_page: int = 0
+    created_at: float = field(
+        default_factory=time.monotonic
+    )
 
 
-USER_SESSIONS: dict[
-    int,
-    UserSession,
-] = {}
+USER_SESSIONS: dict[int, UserSession] = {}
+
+
+def save_session(
+    chat_id: int,
+    session: UserSession,
+) -> None:
+
+    USER_SESSIONS[chat_id] = session
+
+    # Simple bounded session store.
+    if len(USER_SESSIONS) <= settings.max_sessions:
+        return
+
+    oldest_chat = min(
+        USER_SESSIONS,
+        key=lambda key: (
+            USER_SESSIONS[key].created_at
+        ),
+    )
+
+    USER_SESSIONS.pop(
+        oldest_chat,
+        None,
+    )
 
 
 # ============================================================
@@ -2310,8 +2266,26 @@ def platform_callback(
         .replace(" ", "_")
     )
 
+    return f"platform:{normalized}"
+
+
+def normalized_platform(
+    platform: str,
+) -> str:
+
     return (
-        f"platform:{normalized}"
+        platform.lower()
+        .replace(" ", "_")
+    )
+
+
+def platform_from_callback(
+    value: str,
+) -> str:
+
+    return value.replace(
+        "_",
+        " ",
     )
 
 
@@ -2319,13 +2293,9 @@ def build_summary_keyboard(
     results: list[CheckResult],
 ) -> InlineKeyboardMarkup:
 
-    rows: list[
-        list[InlineKeyboardButton]
-    ] = []
+    rows = []
 
-    current: list[
-        InlineKeyboardButton
-    ] = []
+    current = []
 
     for result in results:
 
@@ -2335,8 +2305,7 @@ def build_summary_keyboard(
         current.append(
             InlineKeyboardButton(
                 text=(
-                    f"{status_icon(result.status)} "
-                    f"{result.platform}"
+                    f"🟢 {result.platform}"
                 ),
                 callback_data=platform_callback(
                     result.platform
@@ -2345,17 +2314,11 @@ def build_summary_keyboard(
         )
 
         if len(current) == 2:
-
-            rows.append(
-                current
-            )
-
+            rows.append(current)
             current = []
 
     if current:
-        rows.append(
-            current
-        )
+        rows.append(current)
 
     rows.append(
         [
@@ -2379,38 +2342,35 @@ def build_platform_keyboard(
     platform: str,
 ) -> InlineKeyboardMarkup:
 
-    normalized = (
-        platform.lower()
-        .replace(" ", "_")
+    normalized = normalized_platform(
+        platform
     )
 
-    rows = [
-        [
-            InlineKeyboardButton(
-                text="👤 معلومات الحساب",
-                callback_data=(
-                    f"profile:{normalized}"
-                ),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="🎬 المحتوى العام",
-                callback_data=(
-                    f"media:{normalized}:0"
-                ),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="⬅️ رجوع",
-                callback_data="summary",
-            )
-        ],
-    ]
-
     return InlineKeyboardMarkup(
-        inline_keyboard=rows
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👤 معلومات الحساب",
+                    callback_data=(
+                        f"profile:{normalized}"
+                    ),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎬 المحتوى العام",
+                    callback_data=(
+                        f"media:{normalized}:0"
+                    ),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ رجوع",
+                    callback_data="summary",
+                )
+            ],
+        ]
     )
 
 
@@ -2421,8 +2381,8 @@ def format_summary(
 
     counts = {
         status: sum(
-            r.status == status
-            for r in results
+            result.status == status
+            for result in results
         )
         for status in Status
     }
@@ -2431,22 +2391,22 @@ def format_summary(
         "🔎 <b>Username Checker</b>",
         "",
         (
-            f"👤 Username: "
+            "👤 Username: "
             f"<code>{esc(username)}</code>"
         ),
         "",
         (
-            f"🟢 Confirmed: "
+            "🟢 Confirmed: "
             f"<b>{counts[Status.CONFIRMED]}</b>\n"
-            f"🔴 Not Found: "
+            "🔴 Not Found: "
             f"<b>{counts[Status.NOT_FOUND]}</b>\n"
-            f"🟠 Unknown: "
+            "🟠 Unknown: "
             f"<b>{counts[Status.UNKNOWN]}</b>\n"
-            f"🟡 Rate Limited: "
+            "🟡 Rate Limited: "
             f"<b>{counts[Status.RATE_LIMITED]}</b>\n"
-            f"🔒 Private: "
+            "🔒 Private: "
             f"<b>{counts[Status.PRIVATE]}</b>\n"
-            f"⚪ Unavailable: "
+            "⚪ Unavailable: "
             f"<b>{counts[Status.UNAVAILABLE]}</b>"
         ),
         "",
@@ -2463,7 +2423,6 @@ def format_summary(
         )
 
         if result.profile_url:
-
             line += (
                 " "
                 + make_link(
@@ -2472,16 +2431,14 @@ def format_summary(
                 )
             )
 
-        lines.append(
-            line
-        )
+        lines.append(line)
 
     lines.extend(
         [
             "",
             (
                 "👇 <b>اضغط على المنصة</b> "
-                "لفتح تفاصيل الحساب والمحتوى العام."
+                "لعرض التفاصيل المتاحة."
             ),
             "",
             (
@@ -2524,7 +2481,6 @@ def format_details(
         )
 
         if result.confidence:
-
             lines.append(
                 f"<code>"
                 f"{confidence_bar(result.confidence)}"
@@ -2532,45 +2488,33 @@ def format_details(
             )
 
         if result.reason:
-
             lines.append(
                 "Reason: "
                 f"{esc(result.reason)}"
             )
 
         if result.evidence:
-
-            lines.append(
-                "Evidence:"
-            )
+            lines.append("Evidence:")
 
             for evidence in result.evidence:
-
                 lines.append(
-                    f"• "
-                    f"{esc(evidence.message)}"
+                    f"• {esc(evidence.message)}"
                 )
 
         if result.data:
 
-            lines.append(
-                "Public data:"
-            )
+            lines.append("Public data:")
 
             for key, value in result.data.items():
 
                 if value is None:
                     continue
 
-                if isinstance(
-                    value,
-                    str,
-                ) and len(value) > 250:
-
-                    value = (
-                        value[:247]
-                        + "..."
-                    )
+                if (
+                    isinstance(value, str)
+                    and len(value) > 250
+                ):
+                    value = value[:247] + "..."
 
                 lines.append(
                     f"• <b>{esc(key)}</b>: "
@@ -2578,7 +2522,6 @@ def format_details(
                 )
 
         if result.profile_url:
-
             lines.append(
                 make_link(
                     "🔗 Profile",
@@ -2602,15 +2545,14 @@ def format_profile(
         ),
         "",
         (
-            f"Username: "
+            "Username: "
             f"<code>@{esc(profile.username)}</code>"
         ),
     ]
 
     if profile.display_name:
-
         lines.append(
-            f"Display name: "
+            "Display name: "
             f"<b>{esc(profile.display_name)}</b>"
         )
 
@@ -2619,11 +2561,7 @@ def format_profile(
         bio = profile.bio
 
         if len(bio) > 600:
-
-            bio = (
-                bio[:597]
-                + "..."
-            )
+            bio = bio[:597] + "..."
 
         lines.extend(
             [
@@ -2657,14 +2595,12 @@ def format_profile(
     )
 
     if profile.verified is not None:
-
         lines.append(
             "Verified: "
             f"<b>{'YES' if profile.verified else 'NO'}</b>"
         )
 
     if profile.website:
-
         lines.append(
             make_link(
                 "🌐 Website",
@@ -2673,7 +2609,6 @@ def format_profile(
         )
 
     if profile.profile_url:
-
         lines.extend(
             [
                 "",
@@ -2688,8 +2623,8 @@ def format_profile(
         [
             "",
             (
-                "ℹ️ <i>Only information available "
-                "from the public page is displayed.</i>"
+                "ℹ️ <i>المعلومات المعروضة هي فقط "
+                "المعلومات المتاحة للعامة.</i>"
             ),
         ]
     )
@@ -2736,10 +2671,7 @@ def format_media_list(
             f"Public Content</b>"
         ),
         "",
-        (
-            f"👤 "
-            f"<code>@{esc(username)}</code>"
-        ),
+        f"👤 <code>@{esc(username)}</code>",
         "",
     ]
 
@@ -2750,8 +2682,8 @@ def format_media_list(
                 "⚪ <b>لا يوجد محتوى قابل للاستخراج.</b>",
                 "",
                 (
-                    "قد يكون المحتوى غير متاح للطلب العام "
-                    "أو يتطلب وصولًا غير متوفر."
+                    "قد يكون المحتوى ديناميكيًا، "
+                    "خاصًا، أو غير مكشوف كرابط مباشر."
                 ),
             ]
         )
@@ -2763,12 +2695,15 @@ def format_media_list(
             start=start + 1,
         ):
 
+            icon = (
+                "🎬"
+                if item.media_type == MediaType.VIDEO
+                else "🖼️"
+            )
+
             lines.append(
-                (
-                    f"{index}. "
-                    f"{'🎬' if item.media_type == MediaType.VIDEO else '🖼️'} "
-                    f"<b>{item.media_type.value}</b>"
-                )
+                f"{index}. {icon} "
+                f"<b>{item.media_type.value}</b>"
             )
 
             if item.title:
@@ -2776,10 +2711,7 @@ def format_media_list(
                 title = item.title
 
                 if len(title) > 100:
-                    title = (
-                        title[:97]
-                        + "..."
-                    )
+                    title = title[:97] + "..."
 
                 lines.append(
                     f"   {esc(title)}"
@@ -2809,9 +2741,8 @@ def build_media_keyboard(
     page: int,
 ) -> InlineKeyboardMarkup:
 
-    normalized = (
-        platform.lower()
-        .replace(" ", "_")
+    normalized = normalized_platform(
+        platform
     )
 
     per_page = 5
@@ -2840,9 +2771,7 @@ def build_media_keyboard(
         start:start + per_page
     ]
 
-    rows: list[
-        list[InlineKeyboardButton]
-    ] = []
+    rows = []
 
     for index, item in enumerate(
         current,
@@ -2871,12 +2800,9 @@ def build_media_keyboard(
             ]
         )
 
-    navigation: list[
-        InlineKeyboardButton
-    ] = []
+    navigation = []
 
     if page > 0:
-
         navigation.append(
             InlineKeyboardButton(
                 text="⬅️",
@@ -2896,7 +2822,6 @@ def build_media_keyboard(
     )
 
     if page < total_pages - 1:
-
         navigation.append(
             InlineKeyboardButton(
                 text="➡️",
@@ -2908,9 +2833,7 @@ def build_media_keyboard(
             )
         )
 
-    rows.append(
-        navigation
-    )
+    rows.append(navigation)
 
     rows.append(
         [
@@ -2935,12 +2858,10 @@ def build_media_keyboard(
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
-@dp.message(
-    Command("start")
-)
+@dp.message(Command("start"))
 async def start_handler(
     message: Message,
 ):
@@ -2950,18 +2871,16 @@ async def start_handler(
         "أرسل اسم المستخدم فقط.\n\n"
         "مثال:\n"
         "<code>example</code>\n\n"
-        "بعد الفحص يمكنك الضغط على أي منصة "
-        "لعرض المعلومات العامة والمحتوى المتاح."
+        "بعد الفحص ستظهر لك المنصات التي تم "
+        "العثور عليها مع مستوى الثقة."
     )
 
 
 # ============================================================
-# /HELP
+# HELP
 # ============================================================
 
-@dp.message(
-    Command("help")
-)
+@dp.message(Command("help"))
 async def help_handler(
     message: Message,
 ):
@@ -2969,15 +2888,17 @@ async def help_handler(
     await message.answer(
         "ℹ️ <b>طريقة الاستخدام</b>\n\n"
         "1️⃣ أرسل Username بدون @.\n"
-        "2️⃣ انتظر نتائج الفحص.\n"
-        "3️⃣ اضغط على المنصة.\n"
-        "4️⃣ اختر معلومات الحساب أو المحتوى العام.\n\n"
+        "2️⃣ انتظر النتائج.\n"
+        "3️⃣ اختر المنصة.\n"
+        "4️⃣ يمكنك عرض المعلومات العامة والمحتوى المكشوف.\n\n"
         "🟢 CONFIRMED = دليل قوي\n"
         "🔴 NOT FOUND = دليل على عدم العثور\n"
         "🟠 UNKNOWN = لا يوجد دليل كافٍ\n"
-        "🟡 RATE LIMITED = حد طلبات\n"
-        "🔒 PRIVATE = حساب/محتوى خاص\n"
-        "⚪ UNAVAILABLE = المحتوى غير متاح للطلب العام"
+        "🟡 RATE LIMITED = المصدر حدّ الطلبات\n"
+        "🔒 PRIVATE = محتوى/حساب خاص\n"
+        "⚪ UNAVAILABLE = غير متاح للطلب العام\n\n"
+        "⚠️ الأداة لا تتجاوز تسجيل الدخول أو CAPTCHA "
+        "أو أنظمة الحماية."
     )
 
 
@@ -2985,9 +2906,7 @@ async def help_handler(
 # USERNAME CHECK
 # ============================================================
 
-@dp.message(
-    F.text
-)
+@dp.message(F.text)
 async def username_handler(
     message: Message,
 ):
@@ -2999,36 +2918,29 @@ async def username_handler(
     )
 
     if not username:
-
         await message.answer(
             "❌ أرسل Username صالح."
         )
-
         return
 
     if len(username) > settings.max_username_length:
-
         await message.answer(
             "❌ Username طويل جدًا."
         )
-
         return
 
     if not valid_username(username):
-
         await message.answer(
             "❌ Username غير صالح.\n\n"
             "المسموح:\n"
             "A-Z / a-z / 0-9 / . / _ / -"
         )
-
         return
 
     status_message = await message.answer(
         "🔎 <b>جاري الفحص...</b>\n\n"
-        f"Username: "
-        f"<code>{esc(username)}</code>\n\n"
-        "⏳ يتم فحص المصادر..."
+        f"Username: <code>{esc(username)}</code>\n\n"
+        "⏳ يتم فحص المصادر العامة..."
     )
 
     started = time.monotonic()
@@ -3046,8 +2958,7 @@ async def username_handler(
         )
 
         await status_message.edit_text(
-            "❌ حدث خطأ أثناء الفحص.\n\n"
-            f"<code>{esc(exc)}</code>"
+            "❌ حدث خطأ أثناء الفحص."
         )
 
         return
@@ -3057,11 +2968,12 @@ async def username_handler(
         - started
     )
 
-    USER_SESSIONS[
-        message.chat.id
-    ] = UserSession(
-        username=username,
-        results=results,
+    save_session(
+        message.chat.id,
+        UserSession(
+            username=username,
+            results=results,
+        ),
     )
 
     text = format_summary(
@@ -3070,8 +2982,7 @@ async def username_handler(
     )
 
     text += (
-        f"\n\n⏱️ "
-        f"<code>{elapsed:.2f}s</code>"
+        f"\n\n⏱️ <code>{elapsed:.2f}s</code>"
     )
 
     await status_message.edit_text(
@@ -3097,17 +3008,13 @@ async def platform_callback_handler(
         await callback.answer()
         return
 
-    raw_platform = (
-        callback.data
-        .split(
-            ":",
-            1,
-        )[1]
-    )
+    raw_platform = callback.data.split(
+        ":",
+        1,
+    )[1]
 
-    platform = raw_platform.replace(
-        "_",
-        " ",
+    platform = platform_from_callback(
+        raw_platform
     )
 
     session = USER_SESSIONS.get(
@@ -3115,12 +3022,10 @@ async def platform_callback_handler(
     )
 
     if not session:
-
         await callback.answer(
             "لا توجد جلسة.",
             show_alert=True,
         )
-
         return
 
     provider = PROVIDER_MAP.get(
@@ -3128,17 +3033,13 @@ async def platform_callback_handler(
     )
 
     if not provider:
-
         await callback.answer(
             "المنصة غير مدعومة.",
             show_alert=True,
         )
-
         return
 
-    session.selected_platform = (
-        provider.name
-    )
+    session.selected_platform = provider.name
 
     result = next(
         (
@@ -3151,12 +3052,10 @@ async def platform_callback_handler(
     )
 
     if not result:
-
         await callback.answer(
             "لا توجد نتيجة لهذه المنصة.",
             show_alert=True,
         )
-
         return
 
     text = (
@@ -3171,7 +3070,6 @@ async def platform_callback_handler(
     )
 
     if result.profile_url:
-
         text += (
             "\n\n"
             + make_link(
@@ -3180,12 +3078,17 @@ async def platform_callback_handler(
             )
         )
 
-    if result.status != Status.CONFIRMED:
-
+    if result.reason:
         text += (
             "\n\n"
-            "⚠️ لا يمكن استخراج المحتوى "
-            "إلا عندما يكون متاحًا للعامة."
+            f"ℹ️ {esc(result.reason)}"
+        )
+
+    if result.status != Status.CONFIRMED:
+        text += (
+            "\n\n"
+            "⚠️ لا يتم اعتبار المحتوى متاحًا "
+            "إلا إذا كان مكشوفًا للعامة."
         )
 
     await callback.message.edit_text(
@@ -3213,17 +3116,13 @@ async def profile_callback_handler(
         await callback.answer()
         return
 
-    raw_platform = (
-        callback.data
-        .split(
-            ":",
-            1,
-        )[1]
-    )
+    raw_platform = callback.data.split(
+        ":",
+        1,
+    )[1]
 
-    platform = raw_platform.replace(
-        "_",
-        " ",
+    platform = platform_from_callback(
+        raw_platform
     )
 
     session = USER_SESSIONS.get(
@@ -3231,12 +3130,10 @@ async def profile_callback_handler(
     )
 
     if not session:
-
         await callback.answer(
             "لا توجد جلسة.",
             show_alert=True,
         )
-
         return
 
     provider = PROVIDER_MAP.get(
@@ -3244,12 +3141,10 @@ async def profile_callback_handler(
     )
 
     if not provider:
-
         await callback.answer(
             "المنصة غير مدعومة.",
             show_alert=True,
         )
-
         return
 
     await callback.answer(
@@ -3277,23 +3172,19 @@ async def profile_callback_handler(
 
         return
 
+    normalized = normalized_platform(
+        provider.name
+    )
+
     await callback.message.edit_text(
-        format_profile(
-            profile
-        ),
+        format_profile(profile),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
                         text="🎬 المحتوى العام",
                         callback_data=(
-                            "media:"
-                            + provider.name.lower()
-                            .replace(
-                                " ",
-                                "_",
-                            )
-                            + ":0"
+                            f"media:{normalized}:0"
                         ),
                     )
                 ],
@@ -3301,12 +3192,7 @@ async def profile_callback_handler(
                     InlineKeyboardButton(
                         text="⬅️ رجوع",
                         callback_data=(
-                            "platform:"
-                            + provider.name.lower()
-                            .replace(
-                                " ",
-                                "_",
-                            )
+                            f"platform:{normalized}"
                         ),
                     )
                 ],
@@ -3330,17 +3216,13 @@ async def media_callback_handler(
         await callback.answer()
         return
 
-    parts = callback.data.split(
-        ":"
-    )
+    parts = callback.data.split(":")
 
     if len(parts) != 3:
-
         await callback.answer(
             "طلب غير صالح.",
             show_alert=True,
         )
-
         return
 
     raw_platform = parts[1]
@@ -3350,9 +3232,10 @@ async def media_callback_handler(
     except ValueError:
         page = 0
 
-    platform = raw_platform.replace(
-        "_",
-        " ",
+    page = max(0, page)
+
+    platform = platform_from_callback(
+        raw_platform
     )
 
     session = USER_SESSIONS.get(
@@ -3360,12 +3243,10 @@ async def media_callback_handler(
     )
 
     if not session:
-
         await callback.answer(
             "لا توجد جلسة.",
             show_alert=True,
         )
-
         return
 
     provider = PROVIDER_MAP.get(
@@ -3373,12 +3254,10 @@ async def media_callback_handler(
     )
 
     if not provider:
-
         await callback.answer(
             "المنصة غير مدعومة.",
             show_alert=True,
         )
-
         return
 
     await callback.answer(
@@ -3390,12 +3269,8 @@ async def media_callback_handler(
         session.username,
     )
 
-    session.selected_platform = (
-        provider.name
-    )
-
+    session.selected_platform = provider.name
     session.media = items
-
     session.media_page = page
 
     await callback.message.edit_text(
@@ -3428,17 +3303,13 @@ async def get_media_callback_handler(
         await callback.answer()
         return
 
-    parts = callback.data.split(
-        ":"
-    )
+    parts = callback.data.split(":")
 
     if len(parts) != 3:
-
         await callback.answer(
             "طلب غير صالح.",
             show_alert=True,
         )
-
         return
 
     raw_platform = parts[1]
@@ -3446,17 +3317,14 @@ async def get_media_callback_handler(
     try:
         index = int(parts[2])
     except ValueError:
-
         await callback.answer(
             "رقم المحتوى غير صالح.",
             show_alert=True,
         )
-
         return
 
-    platform = raw_platform.replace(
-        "_",
-        " ",
+    platform = platform_from_callback(
+        raw_platform
     )
 
     session = USER_SESSIONS.get(
@@ -3464,12 +3332,10 @@ async def get_media_callback_handler(
     )
 
     if not session:
-
         await callback.answer(
             "لا توجد جلسة.",
             show_alert=True,
         )
-
         return
 
     provider = PROVIDER_MAP.get(
@@ -3477,16 +3343,20 @@ async def get_media_callback_handler(
     )
 
     if not provider:
-
         await callback.answer(
             "المنصة غير مدعومة.",
             show_alert=True,
         )
-
         return
 
-    # If media isn't loaded yet, load it.
-    if not session.media:
+    # --------------------------------------------------------
+    # Load media if necessary.
+    # --------------------------------------------------------
+
+    if (
+        not session.media
+        or session.selected_platform != provider.name
+    ):
 
         await callback.answer(
             "⏳ جاري جلب المحتوى..."
@@ -3497,28 +3367,29 @@ async def get_media_callback_handler(
             session.username,
         )
 
-    if index < 0 or index >= len(
-        session.media
-    ):
+        session.selected_platform = provider.name
 
+    if index < 0 or index >= len(session.media):
         await callback.answer(
             "المحتوى غير موجود.",
             show_alert=True,
         )
-
         return
 
-    item = session.media[
-        index
-    ]
+    item = session.media[index]
 
     if not item.downloadable:
-
         await callback.answer(
             "هذا المحتوى غير متاح كملف مباشر.",
             show_alert=True,
         )
+        return
 
+    if not is_safe_media_url(item.url):
+        await callback.answer(
+            "رابط المحتوى غير صالح للتنزيل.",
+            show_alert=True,
+        )
         return
 
     await callback.answer(
@@ -3534,14 +3405,13 @@ async def get_media_callback_handler(
 
     extension = (
         ".mp4"
-        if item.media_type
-        == MediaType.VIDEO
+        if item.media_type == MediaType.VIDEO
         else ".jpg"
     )
 
     filename = (
         f"{callback.message.chat.id}_"
-        f"{int(time.time())}"
+        f"{int(time.time() * 1000)}"
         f"{extension}"
     )
 
@@ -3556,59 +3426,62 @@ async def get_media_callback_handler(
         * 1024
     )
 
-    ok, reason = await http_client.stream_to_file(
-        item.url,
-        path,
-        max_bytes,
-    )
+    try:
 
-    if not ok:
-
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
-
-        if reason == "RATE_LIMITED":
-
-            await callback.message.answer(
-                "🟡 المنصة حدّت طلبات الوصول للمحتوى."
+        ok, reason = (
+            await http_client.stream_to_file(
+                item.url,
+                path,
+                max_bytes,
             )
+        )
 
-        elif reason == "FILE_TOO_LARGE":
+        if not ok:
 
-            await callback.message.answer(
-                (
+            if reason == "RATE_LIMITED":
+                message = (
+                    "🟡 المصدر حدّ طلبات الوصول."
+                )
+
+            elif reason == "FILE_TOO_LARGE":
+                message = (
                     "⚠️ الملف أكبر من الحد المسموح "
                     f"({settings.max_media_size_mb} MB)."
                 )
-            )
 
-        elif reason in {
-            "HTTP 401",
-            "HTTP 403",
-        }:
-
-            await callback.message.answer(
-                (
-                    "⚪ الملف غير متاح للطلب العام "
-                    "من المصدر الحالي."
+            elif reason in {
+                "HTTP 401",
+                "HTTP 403",
+            }:
+                message = (
+                    "⚪ الملف غير متاح للطلب العام."
                 )
-            )
 
-        else:
+            elif reason in {
+                "NOT_DIRECT_MEDIA",
+                "STREAM_MANIFEST",
+                "UNSUPPORTED_CONTENT_TYPE",
+            }:
+                message = (
+                    "⚪ الرابط ليس ملف صورة/فيديو مباشرًا."
+                )
 
-            await callback.message.answer(
-                (
+            elif reason == "UNSAFE_URL":
+                message = (
+                    "⚪ تم رفض رابط غير آمن."
+                )
+
+            else:
+                message = (
                     "⚪ لم أتمكن من جلب الملف العام.\n"
                     f"Reason: <code>{esc(reason)}</code>"
                 )
+
+            await callback.message.answer(
+                message
             )
 
-        return
-
-    try:
+            return
 
         caption = (
             f"🎬 <b>{esc(provider.name)}</b>\n"
@@ -3618,7 +3491,6 @@ async def get_media_callback_handler(
         )
 
         if item.source_url:
-
             caption += (
                 "\n\n"
                 + make_link(
@@ -3630,19 +3502,22 @@ async def get_media_callback_handler(
         if item.media_type == MediaType.VIDEO:
 
             await callback.message.answer_video(
-                video=FSInputFile(
-                    path
-                ),
+                video=FSInputFile(path),
                 caption=caption,
                 supports_streaming=True,
             )
 
-        else:
+        elif item.media_type == MediaType.IMAGE:
 
             await callback.message.answer_photo(
-                photo=FSInputFile(
-                    path
-                ),
+                photo=FSInputFile(path),
+                caption=caption,
+            )
+
+        else:
+
+            await callback.message.answer_document(
+                document=FSInputFile(path),
                 caption=caption,
             )
 
@@ -3653,10 +3528,7 @@ async def get_media_callback_handler(
         )
 
         await callback.message.answer(
-            (
-                "❌ فشل إرسال الملف إلى Telegram.\n"
-                f"<code>{esc(exc)}</code>"
-            )
+            "❌ فشل إرسال الملف إلى Telegram."
         )
 
     finally:
@@ -3664,10 +3536,7 @@ async def get_media_callback_handler(
         try:
 
             if os.path.exists(path):
-
-                os.remove(
-                    path
-                )
+                os.remove(path)
 
         except Exception:
 
@@ -3689,9 +3558,7 @@ async def details_callback(
 ):
 
     if not callback.message:
-
         await callback.answer()
-
         return
 
     session = USER_SESSIONS.get(
@@ -3699,12 +3566,10 @@ async def details_callback(
     )
 
     if not session:
-
         await callback.answer(
             "لا توجد نتيجة محفوظة.",
             show_alert=True,
         )
-
         return
 
     await callback.message.edit_text(
@@ -3739,9 +3604,7 @@ async def summary_callback(
 ):
 
     if not callback.message:
-
         await callback.answer()
-
         return
 
     session = USER_SESSIONS.get(
@@ -3749,12 +3612,10 @@ async def summary_callback(
     )
 
     if not session:
-
         await callback.answer(
             "لا توجد نتيجة محفوظة.",
             show_alert=True,
         )
-
         return
 
     await callback.message.edit_text(
@@ -3782,9 +3643,7 @@ async def recheck_callback(
 ):
 
     if not callback.message:
-
         await callback.answer()
-
         return
 
     session = USER_SESSIONS.get(
@@ -3792,12 +3651,10 @@ async def recheck_callback(
     )
 
     if not session:
-
         await callback.answer(
             "لا توجد نتيجة لإعادة الفحص.",
             show_alert=True,
         )
-
         return
 
     username = session.username
@@ -3808,21 +3665,36 @@ async def recheck_callback(
 
     started = time.monotonic()
 
-    results = await engine.check(
-        username,
-        force=True,
-    )
+    try:
+
+        results = await engine.check(
+            username,
+            force=True,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Recheck failed."
+        )
+
+        await callback.message.answer(
+            "❌ فشلت إعادة الفحص."
+        )
+
+        return
 
     elapsed = (
         time.monotonic()
         - started
     )
 
-    USER_SESSIONS[
-        callback.message.chat.id
-    ] = UserSession(
-        username=username,
-        results=results,
+    save_session(
+        callback.message.chat.id,
+        UserSession(
+            username=username,
+            results=results,
+        ),
     )
 
     text = format_summary(
@@ -3831,8 +3703,7 @@ async def recheck_callback(
     )
 
     text += (
-        f"\n\n⏱️ "
-        f"<code>{elapsed:.2f}s</code>"
+        f"\n\n⏱️ <code>{elapsed:.2f}s</code>"
     )
 
     await callback.message.edit_text(
@@ -3872,7 +3743,7 @@ async def health_handler(
         {
             "status": "ok",
             "service": "username-checker",
-            "version": "2.0",
+            "version": "3.0",
             "time": datetime.now(
                 timezone.utc
             ).isoformat(),
@@ -3887,7 +3758,6 @@ async def webhook_handler(
     global bot
 
     if bot is None:
-
         return web.json_response(
             {
                 "ok": False,
@@ -3922,28 +3792,26 @@ async def webhook_handler(
         )
 
         return web.json_response(
-            {
-                "ok": True
-            }
+            {"ok": True}
         )
 
-    except Exception as exc:
+    except Exception:
 
         logger.exception(
-            "Webhook update failed"
+            "Webhook update failed."
         )
 
+        # لا نرسل تفاصيل exception إلى المستخدم.
         return web.json_response(
             {
                 "ok": False,
-                "error": str(exc),
+                "error": "Update processing failed",
             },
             status=500,
         )
 
 
 async def create_web_app():
-
     app = web.Application()
 
     app.router.add_get(
@@ -3973,7 +3841,6 @@ async def setup_webhook(
 ):
 
     if not settings.render_url:
-
         raise RuntimeError(
             "RENDER_URL is missing."
         )
@@ -3983,6 +3850,11 @@ async def setup_webhook(
         .strip()
         .rstrip("/")
     )
+
+    if not base_url.startswith("https://"):
+        raise RuntimeError(
+            "RENDER_URL must use HTTPS."
+        )
 
     webhook_url = (
         f"{base_url}"
@@ -4018,6 +3890,12 @@ async def setup_webhook(
         info.url,
     )
 
+    if info.last_error_message:
+        logger.warning(
+            "Telegram webhook last error: %s",
+            info.last_error_message,
+        )
+
 
 # ============================================================
 # MAIN
@@ -4028,26 +3906,14 @@ async def main():
     global bot
 
     if not settings.bot_token:
-
         raise RuntimeError(
-            "BOT_TOKEN is missing."
-        )
-
-    if (
-        settings.bot_token
-        == "YOUR_TOKEN_HERE"
-    ):
-
-        raise RuntimeError(
-            "Replace YOUR_TOKEN_HERE "
-            "with your bot token."
+            "BOT_TOKEN is missing. "
+            "Add BOT_TOKEN to Render Environment Variables."
         )
 
     if not settings.render_url:
-
         raise RuntimeError(
-            "RENDER_URL is missing. "
-            "Add your Render service URL."
+            "RENDER_URL is missing."
         )
 
     bot = Bot(
@@ -4080,12 +3946,6 @@ async def main():
 
         app = await create_web_app()
 
-        logger.info(
-            "Starting HTTP server on "
-            "0.0.0.0:%s",
-            settings.port,
-        )
-
         runner = web.AppRunner(
             app
         )
@@ -4101,7 +3961,8 @@ async def main():
         await site.start()
 
         logger.info(
-            "HTTP server started."
+            "HTTP server started on 0.0.0.0:%s",
+            settings.port,
         )
 
         logger.info(
@@ -4109,10 +3970,7 @@ async def main():
         )
 
         while True:
-
-            await asyncio.sleep(
-                3600
-            )
+            await asyncio.sleep(3600)
 
     except asyncio.CancelledError:
 
@@ -4139,32 +3997,36 @@ async def main():
         if runner:
 
             try:
-
                 await runner.cleanup()
-
             except Exception:
-
                 logger.exception(
-                    "Failed to cleanup HTTP server."
+                    "HTTP cleanup failed."
                 )
-
-        try:
-
-            if bot:
-
-                await bot.delete_webhook()
-
-        except Exception:
-
-            logger.exception(
-                "Failed to remove webhook."
-            )
-
-        await http_client.close()
 
         if bot:
 
-            await bot.session.close()
+            try:
+                await bot.delete_webhook()
+            except Exception:
+                logger.exception(
+                    "Failed to remove webhook."
+                )
+
+        try:
+            await http_client.close()
+        except Exception:
+            logger.exception(
+                "Failed to close HTTP client."
+            )
+
+        if bot:
+
+            try:
+                await bot.session.close()
+            except Exception:
+                logger.exception(
+                    "Failed to close Telegram session."
+                )
 
 
 # ============================================================
