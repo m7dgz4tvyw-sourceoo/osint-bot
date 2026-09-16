@@ -10,7 +10,6 @@ from flask import Flask
 TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 bot = telebot.TeleBot(TOKEN)
 
-# إنشاء خادم الويب الأساسي ليلتقطه فاحص منافذ Render فوراً
 app = Flask(__name__)
 
 @app.route('/')
@@ -18,8 +17,11 @@ def home():
     return "🤖 OSINT Bot is active and running 24/7!"
 
 def run_bot():
-    print("🤖 بوت تيليجرام يعمل الآن...")
-    bot.infinity_polling()
+    try:
+        print("🤖 بوت تيليجرام يبدأ الاتصال...")
+        bot.infinity_polling(none_stop=True, interval=0, timeout=20)
+    except Exception as e:
+        print(f"Error in bot polling: {e}")
 
 def analyze_username_strength(username):
     length = len(username)
@@ -158,11 +160,11 @@ def search_username(message):
         bot.delete_message(message.chat.id, msg.message_id)
 
 if __name__ == "__main__":
-    # تشغيل بوت تيليجرام في الخلفية
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
+    # تشغيل البوت في خيط خلفي مستقل تماماً
+    t = threading.Thread(target=run_bot)
+    t.daemon = True
+    t.start()
     
-    # تشغيل خادم الويب على المنفذ المطلوب لتراها منصة Render فوراً
+    # تشغيل خادم Flask بشكل أساسي ليفتح المنفذ وتستجيب المنصة فورا
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
