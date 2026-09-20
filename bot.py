@@ -19,7 +19,7 @@ from playwright.async_api import async_playwright
 TELEGRAM_TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 
 # ← ضع msToken هنا (من Chrome على اللابتوب)
-MS_TOKEN = "SbKFBxCvan4R3PIo-ovCRQJlkFTO5Qw0KrohBHLjoUEedVgbHsLTqD_-9UV-ekPwqI3w9fFGSm-huPCuPyYTVHBAHN-gy0r7xxULubTNgbS2joRZlMNxPb6ZSQllF2IKerlcfqY63ZPWCwXJCAezA-sWFkarhU-OtpTX4Qdc"
+MS_TOKEN = "O70pe_t0upi_s9dYP1i5J7pgpYHQpY6GR84dEalaHPF85-0BzMQvyoRInHm0rMLBe84zxmYsQoo8we5yNjS7YMxVi83I6x8lWV990nvbeoPqZ1lV8jtRgVsN-MdcOzRsgoDOukfb_KTGYPy3vGD5q1XJBwAZ6itG1CZLT2BZ"
 
 # ╔══════════════════════════════════════════════════════════╗
 # ║                                                          ║
