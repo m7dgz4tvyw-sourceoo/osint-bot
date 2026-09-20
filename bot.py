@@ -6,7 +6,7 @@ from aiogram.filters import Command
 import httpx
 
 # ضع توكن بوتك هنا
-TOKEN = "YOUR_BOT_TOKEN"
+TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
