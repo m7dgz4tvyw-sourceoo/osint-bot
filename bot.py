@@ -6,11 +6,11 @@ from aiogram.filters import Command
 import httpx
 
 # ضع توكن بوتك هنا
-TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
+TOKEN = "YOUR_BOT_TOKEN"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- 1. حل مشكلة التأخر (Keep-Alive Server لمنع نوم السيرفر) ---
+# --- 1. سيرفر Keep-Alive لمنع خمول السيرفر على الاستضافة ---
 async def handle(request):
     return web.Response(text="Bot is running and active!")
 
@@ -22,7 +22,7 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
 
-# --- 2. دالة جلب وعرض معلومات تيك توك بالتفصيل ---
+# --- 2. دالة جلب وعرض معلومات تيك توك التفصيلية ---
 async def get_tiktok_user_info(username: str):
     url = f"https://www.tiktok.com/@{username}"
     headers = {
@@ -53,7 +53,7 @@ async def get_tiktok_user_info(username: str):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("أهلاً بك! أرسل يوزر تيك توك لفحص معلوماته وحل مشكلة البوت.")
+    await message.answer("أهلاً بك! أرسل يوزر تيك توك لفحص معلوماته.")
 
 @dp.message()
 async def check_tiktok_handler(message: types.Message):
@@ -63,10 +63,10 @@ async def check_tiktok_handler(message: types.Message):
     data = await get_tiktok_user_info(username)
     
     if not data:
-        await processing_msg.edit_text("❌ عذراً، لم يتم العثور على الحساب أو أن اليوزر متاح/محظور.")
+        await processing_msg.edit_text("❌ عذراً، لم يتم العثور على الحساب أو حدث خطأ.")
         return
 
-    # تنسيق الرسالة ليكون مطابقاً تماماً للشكل المطلوب
+    # تنسيق الرسالة ليكون مطابقاً للشكل المطلوب
     info_text = (
         f"👤 **معلومات الحساب:** @{username}\n\n"
         f"🔹 **المتابعين:** {data['follower_count']}\n"
@@ -81,10 +81,14 @@ async def check_tiktok_handler(message: types.Message):
     await processing_msg.edit_text(info_text)
 
 async def main():
-    # تشغيل سيرفر الحفاظ على النشاط في الخلفية
+    # 1. حل مشكلة التعارض وحذف الويب هوك القديم نهائياً
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # 2. تشغيل سيرفر الـ Keep-Alive في الخلفية لمنع نوم البوت
     asyncio.create_task(start_web_server())
     
-    # بدء تشغيل البوت
+    # 3. بدء استقبال الرسائل بسلاسة
+    print("Bot is starting polling successfully...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
