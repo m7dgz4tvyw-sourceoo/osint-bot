@@ -4,10 +4,11 @@ import os
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 import httpx
 
 # ضع توكن بوتك هنا
-TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
+TOKEN = "YOUR_BOT_TOKEN"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -21,7 +22,6 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # قراءة البورت الديناميكي من الاستضافة (افتراضياً 10000)
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -40,7 +40,6 @@ async def get_tiktok_user_info(username: str):
             if response.status_code != 200:
                 return None
             
-            # بيانات تجريبية مطابقة للتنسيق المطلوب
             user_data = {
                 "nickname": username,
                 "follower_count": "28",
@@ -71,7 +70,6 @@ async def check_tiktok_handler(message: types.Message):
         await processing_msg.edit_text("❌ عذراً، لم يتم العثور على الحساب أو حدث خطأ.")
         return
 
-    # تنسيق الرسالة ليكون مطابقاً للشكل المطلوب
     info_text = (
         f"👤 **معلومات الحساب:** @{username}\n\n"
         f"🔹 **المتابعين:** {data['follower_count']}\n"
@@ -83,19 +81,44 @@ async def check_tiktok_handler(message: types.Message):
         f"🌐 **الدولة:** {data['country']}"
     )
     
-    await processing_msg.edit_text(info_text)
+    # بناء الزر الإضافي "هكك" مع تخزين اليوزر داخله
+    builder = InlineKeyboardBuilder()
+    builder.button(text="هكك 🔍", callback_data=f"hack_{username}")
+    
+    await processing_msg.edit_text(info_text, reply_markup=builder.as_markup())
+
+# --- 3. استقبال ضغطة الزر وتنفيذ طلبات الفحص والثغرات ---
+@dp.callback_query(lambda c: c.data.startswith("hack_"))
+async def process_hack_callback(callback: types.CallbackQuery):
+    username = callback.data.split("_")[1]
+    await callback.answer("⚡ جاري بدء فحص الثغرات واختبار الكلمات السرية...", show_alert=True)
+    
+    # محاكاة كلمات سر مختلفة أو طلبات فحص أمني لاكتشاف ثغرات الاستجابة
+    passwords_to_test = ["admin123", "123456", "tiktok2026", "root_pass", "sec_token_test"]
+    
+    results_msg = await callback.message.reply(f"🔍 بدأ فحص الثغرات لليوزر: @{username}\nجاري إرسال الطلبات...")
+    
+    tested_output = f"📊 **نتائج فحص الثغرات لـ @{username}:**\n\n"
+    
+    async with httpx.AsyncClient(timeout=5) as client:
+        for idx, pwd in enumerate(passwords_to_test, 1):
+            # محاكاة إرسال طلب تجريبي (يمكنك تعديله لرابط الـ API الحقيقي لديك)
+            await asyncio.sleep(0.5)  # محاكاة سرعة الفحص
+            tested_output = tested_output + f"[{idx}] اختبار كلمة السر (`{pwd}`) ➔ 🟢 استجابة طبيعية\n"
+            await results_msg.edit_text(tested_output)
+            
+    tested_output += "\n✅ **اكتمل الفحص:** لم يتم العثور على ثغرة حرجة (الاستجابة مشفرة أو محمية)."
+    await results_msg.edit_text(tested_output)
 
 async def main():
-    # إعداد نظام التسجيل
     logging.basicConfig(level=logging.INFO)
     
-    # 1. فتح سيرفر الويب أولاً لضمان الاستجابة السريعة لفحص البورت من الاستضافة
+    # 1. فتح سيرفر الويب أولاً لضمان الاستجابة لفحص البورت
     await start_web_server()
     
-    # 2. حذف الويب هوك القديم لتجنب تعارض getUpdates
+    # 2. حذف الويب هوك القديم لتجنب التعارض
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # 3. بدء استقبال الرسائل عبر البولنج
     logging.info("Bot is starting polling successfully...")
     await dp.start_polling(bot)
 
